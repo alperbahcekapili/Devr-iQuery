@@ -15,3 +15,9 @@ CENG 596 Term Project
 
       Bu da çalışmadı :/ Linux' da çalışmak çözüm gibi gözüküyor
 pip install -r requirements.txt
+
+Linux tarafında da java için yükleme yapmak gerekiyormuş:
+
+sudo apt update
+sudo apt install default-jdk
+

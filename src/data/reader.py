@@ -12,6 +12,8 @@ def parse_documents(folder_path):
 
     result = {}
 
+    file_index = 0
+
     for filename in tqdm.tqdm(os.listdir(folder_path)):
         if filename.endswith(".txt"):
             file_path = os.path.join(folder_path, filename)
@@ -27,11 +29,14 @@ def parse_documents(folder_path):
                 for tag_match in tag_pattern.finditer(doc):
                     tag = tag_match.group(1).strip()
                     value = tag_match.group(2).strip()
-                    doc_dict[tag] = value
+                    doc_dict[tag.lower()] = value
                 
-                result[doc_dict["DOCNO"]] = doc_dict
+                result[doc_dict["docno"]] = doc_dict
                 # result.append(doc_dict)
-
+        if file_index > 10:
+            break
+        file_index+=1
+        
     return result
 
 
