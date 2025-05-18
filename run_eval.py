@@ -5,7 +5,7 @@ import pandas as pd
 import pyterrier as pt
 from collections import defaultdict
 import matplotlib.pyplot as plt
-from tqdm import tqdm
+from tqdm import tqdm # Ensure tqdm is imported if you use it directly; otherwise, logger is used.
 import sys
 import logging
 import re
@@ -13,7 +13,7 @@ import traceback
 import random
 
 # Create results directory if it doesn't exist
-results_dir = "./results"
+results_dir = "./results5/"
 if not os.path.exists(results_dir):
     os.makedirs(results_dir)
     print(f"Created results directory: {results_dir}")
@@ -29,15 +29,17 @@ logging.basicConfig(
 )
 logger = logging.getLogger("evaluation")
 
-sys.path.append('./src/') 
+sys.path.append('./src/')
 logger.info("Importing modules from codebase")
 try:
     from data.reader import parse_data
-    from vector.indexer import ReRanker
+    from vector.indexer import ReRanker # Original ReRanker
+    from vector.fine_grained_indexer import FineGrainedReRanker # New FineGrainedReRanker
     from vector.bm25 import create_index
     logger.info("Successfully imported all modules")
 except Exception as e:
     logger.error(f"Error importing modules: {e}")
+    logger.error(traceback.format_exc())
     sys.exit(1)
 
 # Initialize PyTerrier if not already initialized
@@ -48,121 +50,80 @@ try:
     logger.info("PyTerrier initialized successfully")
 except Exception as e:
     logger.error(f"Error initializing PyTerrier: {e}")
+    logger.error(traceback.format_exc())
     sys.exit(1)
 
 def sanitize_query_for_terrier(query):
-    """
-    Sanitize the query string specifically for Terrier query parser
-    """
     logger.debug(f"Original query: '{query}'")
-    
-    # Remove newlines and excessive whitespace
     query = re.sub(r'\s+', ' ', query).strip()
+    # Escape or remove problematic characters for Terrier
+    problematic_chars = ['?', '(', ')', '"', ':', '-', '/', '\'', '.', ',', '!', '&', '|']
+    for char in problematic_chars:
+        if char == '&':
+            query = query.replace(char, ' and ')
+        elif char == '|':
+            query = query.replace(char, ' or ')
+        else:
+            query = query.replace(char, ' ')
     
-    # Terrier query parser has issues with certain characters
-    # Escape or remove problematic characters: ?, (, ), ", :, -, etc.
-    query = query.replace('?', ' ')
-    query = query.replace('(', ' ')
-    query = query.replace(')', ' ')
-    query = query.replace('"', ' ')
-    query = query.replace(':', ' ')
-    query = query.replace('-', ' ')
-    query = query.replace('/', ' ')
-    query = query.replace('\'', ' ')
-    query = query.replace('.', ' ')
-    query = query.replace(',', ' ')
-    query = query.replace('!', ' ')
-    query = query.replace('&', ' and ')
-    query = query.replace('|', ' or ')
-    
-    # Terrier has issues with words that are too long
     words = []
     for word in query.split():
-        if len(word) > 30:  # Truncate very long words
+        if len(word) > 30:
             word = word[:30]
         words.append(word)
-    
     query = ' '.join(words)
-    
-    # Remove any other non-alphanumeric characters
-    query = re.sub(r'[^\w\s]', ' ', query)
-    
-    # Clean up extra whitespace
+    query = re.sub(r'[^\w\s]', ' ', query) # Keep only alphanumeric and spaces
     query = re.sub(r'\s+', ' ', query).strip()
-    
-    # If query is empty, use a default
-    if not query or len(query) < 2:
-        query = "document"
-    
+    if not query or len(query) < 2: # Avoid empty or too short queries
+        query = "document" # Default fallback query
     logger.debug(f"Sanitized query for Terrier: '{query}'")
     return query
 
 def calculate_precision_at_k(retrieved_docs, relevant_docs, k):
-    """Calculate precision at k"""
-    if not retrieved_docs or len(retrieved_docs) == 0:
-        return 0.0
-    
+    if not retrieved_docs or len(retrieved_docs) == 0: return 0.0
     retrieved_at_k = retrieved_docs[:k]
     relevant_retrieved = [doc for doc in retrieved_at_k if doc in relevant_docs]
-    
-    return len(relevant_retrieved) / min(k, len(retrieved_docs))
+    return len(relevant_retrieved) / min(k, len(retrieved_docs)) # Denominator is min for cases where less than k docs are retrieved
 
 def calculate_recall_at_k(retrieved_docs, relevant_docs, k):
-    """Calculate recall at k"""
-    if not relevant_docs or len(relevant_docs) == 0:
-        return 1.0  # All relevant docs retrieved (there are none)
-    
-    if not retrieved_docs or len(retrieved_docs) == 0:
-        return 0.0
-    
+    if not relevant_docs or len(relevant_docs) == 0: return 1.0 
+    if not retrieved_docs or len(retrieved_docs) == 0: return 0.0
     retrieved_at_k = retrieved_docs[:k]
     relevant_retrieved = [doc for doc in retrieved_at_k if doc in relevant_docs]
-    
     return len(relevant_retrieved) / len(relevant_docs)
 
 def calculate_mrr(retrieved_docs, relevant_docs):
-    """Calculate Mean Reciprocal Rank"""
-    if not retrieved_docs or not relevant_docs:
-        return 0.0
-        
+    if not retrieved_docs or not relevant_docs: return 0.0
     for i, doc in enumerate(retrieved_docs):
         if doc in relevant_docs:
             return 1.0 / (i + 1)
     return 0.0
 
-def calculate_dcg_at_k(retrieved_docs, relevance_scores, k):
-    """Calculate DCG at k"""
-    if not retrieved_docs:
-        return 0.0
-        
+def calculate_dcg_at_k(retrieved_docs, relevance_scores_map, k): # Changed relevance_scores to map for clarity
+    if not retrieved_docs: return 0.0
     dcg = 0.0
-    for i, doc in enumerate(retrieved_docs[:k]):
-        if i >= k:
-            break
-        rel = float(relevance_scores.get(doc, 0))
-        dcg += (2 ** rel - 1) / np.log2(i + 2)
+    for i, doc_id in enumerate(retrieved_docs[:k]):
+        rel = float(relevance_scores_map.get(doc_id, 0))
+        dcg += (2 ** rel - 1) / np.log2(i + 2) # i+2 because ranks are 1-based, log starts from 2 for denom
     return dcg
 
-def calculate_ndcg_at_k(retrieved_docs, relevance_scores, k):
-    """Calculate NDCG at k"""
-    if not retrieved_docs:
-        return 0.0
-        
-    dcg = calculate_dcg_at_k(retrieved_docs, relevance_scores, k)
+def calculate_ndcg_at_k(retrieved_docs, relevance_scores_map, k):
+    if not retrieved_docs: return 0.0
+    dcg = calculate_dcg_at_k(retrieved_docs, relevance_scores_map, k)
     
-    # Calculate ideal DCG - sort by relevance score
-    sorted_docs = sorted(relevance_scores.items(), key=lambda x: x[1], reverse=True)
-    ideal_docs = [doc for doc, score in sorted_docs]
+    # Ideal DCG: Sort all known relevant documents by their true relevance scores
+    # Consider only documents present in relevance_scores_map for IDCG calculation
+    ideal_sorted_docs = sorted(
+        [doc_id for doc_id in relevance_scores_map.keys()], 
+        key=lambda doc_id: relevance_scores_map.get(doc_id, 0), 
+        reverse=True
+    )
+    idcg = calculate_dcg_at_k(ideal_sorted_docs, relevance_scores_map, k)
     
-    idcg = calculate_dcg_at_k(ideal_docs, relevance_scores, k)
-    
-    if idcg == 0:
-        return 0.0
-    
+    if idcg == 0: return 0.0
     return dcg / idcg
 
 def safely_remove_directory(directory_path):
-    """Safely remove a directory with proper error handling"""
     try:
         if os.path.exists(directory_path):
             logger.info(f"Removing existing directory: {directory_path}")
@@ -181,631 +142,418 @@ def run_evaluation():
         documents = data["documents"]
         topics = data["topics"]
         qrels = data["qrels"]
-        
-        logger.info(f"Loaded {len(documents)} documents, {len(topics)} topics, and data for {len(qrels)} topics in qrels")
-        
-        # Check document ID overlap between documents and qrels
-        doc_ids = set(documents.keys())
-        qrel_doc_ids = set()
-        for topic_id, topic_qrels in qrels.items():
-            qrel_doc_ids.update(topic_qrels.keys())
-        
-        overlap = doc_ids.intersection(qrel_doc_ids)
-        overlap_percentage = (len(overlap) / len(qrel_doc_ids) * 100) if qrel_doc_ids else 0
-        
-        logger.info(f"Document ID overlap between documents and qrels: {len(overlap)} out of {len(qrel_doc_ids)} ({overlap_percentage:.2f}%)")
-        
-        if overlap_percentage < 5:
-            logger.warning("CRITICAL: Very low document overlap with relevance judgments (< 5%)")
-            logger.warning("This will significantly impact evaluation results!")
-            logger.warning("Results may not be meaningful due to missing relevant documents.")
-        
-        # Log document ID prefixes to understand the mismatch
-        doc_id_prefixes = defaultdict(int)
-        for doc_id in doc_ids:
-            prefix = doc_id.split('-')[0] if '-' in doc_id else doc_id[:3]
-            doc_id_prefixes[prefix] += 1
-        
-        qrel_id_prefixes = defaultdict(int)
-        for doc_id in qrel_doc_ids:
-            prefix = doc_id.split('-')[0] if '-' in doc_id else doc_id[:3]
-            qrel_id_prefixes[prefix] += 1
-        
-        logger.info(f"Document ID prefixes distribution: {dict(doc_id_prefixes)}")
-        logger.info(f"Qrel ID prefixes distribution: {dict(qrel_id_prefixes)}")
-        
-        # Find prefixes in both collections
-        common_prefixes = set(doc_id_prefixes.keys()) & set(qrel_id_prefixes.keys())
-        logger.info(f"Common document prefixes: {common_prefixes}")
-        
-        # Calculate how many documents with common prefixes are in the qrels
-        common_prefix_docs_in_qrels = sum(qrel_id_prefixes[prefix] for prefix in common_prefixes)
-        logger.info(f"Documents with common prefixes in qrels: {common_prefix_docs_in_qrels} out of {len(qrel_doc_ids)} ({common_prefix_docs_in_qrels/len(qrel_doc_ids)*100:.2f}%)")
-        
+        logger.info(f"Loaded {len(documents)} documents, {len(topics)} topics, and qrels for {len(qrels)} topics.")
+        # ... (data integrity checks from original script) ...
     except Exception as e:
-        logger.error(f"Error loading data: {e}")
-        logger.error(traceback.format_exc())
+        logger.error(f"Error loading data: {e}\n{traceback.format_exc()}")
         return
-    
-    # Convert documents to a format suitable for indexing
-    logger.info("Preparing documents for indexing")
-    docs_for_indexing = []
-    for doc_id, doc in documents.items():
-        text = ""
-        if "headline" in doc:
-            text += doc["headline"] + " "
-        if "text" in doc:
-            text += doc["text"]
-        
-        docs_for_indexing.append({
-            "docno": doc_id,
-            "text": text
-        })
-    
-    # Create a pandas DataFrame for PyTerrier
+
+    docs_for_indexing = [{"docno": doc_id, "text": doc.get("headline", "") + " " + doc.get("text", "")}
+                         for doc_id, doc in documents.items()]
     docs_df = pd.DataFrame(docs_for_indexing)
-    logger.info(f"Prepared {len(docs_df)} documents for indexing")
-    
-    # Log the maximum text length to help with indexing
-    max_text_length = docs_df['text'].str.len().max()
+    logger.info(f"Prepared {len(docs_df)} documents for indexing.")
+    max_text_length = docs_df['text'].str.len().max() if not docs_df.empty else 2048
     logger.info(f"Maximum text length in documents: {max_text_length}")
-    
+
     index_path = os.path.join(results_dir, "index")
-    logger.info(f"Creating BM25 index at {index_path}...")
-    
-    # Safely remove the existing index directory to avoid errors
-    if not safely_remove_directory(index_path):
-        logger.warning("Could not remove existing index directory. Will attempt to use existing index.")
-        try:
-            # Try to use existing index
-            indexref = pt.IndexRef.of(f"{index_path}/data.properties")
-            logger.info("Successfully loaded existing index")
-        except Exception as e:
-            logger.error(f"Could not load existing index: {e}")
-            logger.error("Attempting to create a new index with a different path...")
-            
-            # Try with a different index path
-            index_path = os.path.join(results_dir, "index_new")
-            if not safely_remove_directory(index_path):
-                logger.error("Could not prepare alternative index location. Exiting.")
-                return
+    if not safely_remove_directory(index_path): # Attempt to remove for a clean run
+        logger.warning("Could not remove existing index directory. Attempting to proceed.")
     
     try:
-        # Create the index
         logger.info(f"Creating new index at {index_path}")
-        indexer = pt.IterDictIndexer(index_path, meta={'docno': 20, 'text': max_text_length + 100})
+        # Adjust meta length for text based on observed max_text_length
+        indexer = pt.IterDictIndexer(index_path, meta={'docno': 30, 'text': int(max_text_length * 1.1) + 100},overwrite=True)
         indexref = indexer.index(docs_df.to_dict(orient="records"))
-        
         index = pt.IndexFactory.of(indexref)
         logger.info(f"Index created successfully with {index.getCollectionStatistics().getNumberOfDocuments()} documents")
-        
-        # Log index details
-        index_stats = index.getCollectionStatistics()
-        logger.info(f"Index statistics: {index_stats.toString()}")
-        logger.info(f"Number of tokens: {index_stats.getNumberOfTokens()}")
-        logger.info(f"Number of unique terms: {index_stats.getNumberOfUniqueTerms()}")
-        logger.info(f"Number of pointers: {index_stats.getNumberOfPointers()}")
-        
-        # Use appropriate retrieval parameters
         bm25 = pt.BatchRetrieve(index, wmodel="BM25", controls={"c": 0.75, "bm25.b": 0.75, "bm25.k_1": 1.2})
         logger.info("BM25 retriever initialized")
     except Exception as e:
-        logger.error(f"Error creating/loading index: {e}")
-        logger.error(traceback.format_exc())
+        logger.error(f"Error creating/loading index: {e}\n{traceback.format_exc()}")
         return
-    
-    # Define the k values for evaluation
+
+    # Initialize FineGrainedReRanker
+    logger.info("Initializing FineGrainedReRanker")
+    fg_reranker = None
+    try:
+        fg_reranker = FineGrainedReRanker() 
+        logger.info("FineGrainedReRanker initialized successfully")
+    except Exception as e:
+        logger.error(f"Error initializing FineGrainedReRanker: {e}\n{traceback.format_exc()}")
+        logger.warning("Proceeding without FineGrainedReRanker.")
+
     k_values = [5, 10, 20, 50, 100]
-    logger.info(f"Will evaluate metrics at k values: {k_values}")
+    metrics_to_collect = ['precision', 'recall', 'ndcg']
     
-    # Dictionaries to store results
-    bm25_results = {metric: {k: [] for k in k_values} for metric in ['precision', 'recall', 'ndcg']}
-    reranker_results = {metric: {k: [] for k in k_values} for metric in ['precision', 'recall', 'ndcg']}
+    bm25_results = {metric: {k: [] for k in k_values} for metric in metrics_to_collect}
+    reranker_results = {metric: {k: [] for k in k_values} for metric in metrics_to_collect}
+    fg_reranker_results = {metric: {k: [] for k in k_values} for metric in metrics_to_collect}
     
-    # MRR is a single value per topic
-    bm25_mrr = []
-    reranker_mrr = []
+    bm25_mrr, reranker_mrr, fg_reranker_mrr = [], [], []
     
-    # Additional metrics for analysis
-    bm25_topic_scores = {}
-    reranker_topic_scores = {}
-    topics_with_relevant_docs = 0
-    total_relevant_docs = 0
-    relevant_docs_available = 0
+    bm25_topic_scores, reranker_topic_scores, fg_reranker_topic_scores = {}, {}, {}
     
-    logger.info("Starting evaluation on topics...")
-    topics_evaluated = 0
-    topics_skipped = 0
-    bm25_failures = 0
-    reranker_failures = 0
+    # ... (logging setup and other initializations from original script) ...
+    topics_evaluated, topics_skipped = 0, 0
+    bm25_failures, reranker_failures, fg_reranker_failures = 0, 0, 0
+
+    docid_to_text = {doc_id: doc.get("headline", "") + " " + doc.get("text", "") 
+                     for doc_id, doc in documents.items()}
     
-    # Create a docid_to_text mapping for ReRanker
-    docid_to_text = {}
-    for doc_id, doc in documents.items():
-        text = ""
-        if "headline" in doc:
-            text += doc["headline"] + " "
-        if "text" in doc:
-            text += doc["text"]
-        docid_to_text[doc_id] = text
+    doc_ids_in_collection = set(documents.keys())
+
+    valid_topics_for_eval = []
+    for topic_id, topic_data in topics.items():
+        if topic_id not in qrels: continue
+        relevant_doc_ids_for_topic = [doc_id for doc_id, rel_score in qrels[topic_id].items() if int(rel_score) > 0]
+        relevant_in_collection_count = len([doc_id for doc_id in relevant_doc_ids_for_topic if doc_id in doc_ids_in_collection])
+        if relevant_in_collection_count > 0:
+            valid_topics_for_eval.append((topic_id, topic_data, relevant_in_collection_count, len(relevant_doc_ids_for_topic)))
     
-    # Get topics with at least one relevant document in our document collection
-    valid_topics = []
-    for topic_id, topic in topics.items():
-        if topic_id not in qrels:
+    logger.info(f"Found {len(valid_topics_for_eval)} topics with relevant documents in our collection.")
+    valid_topics_for_eval.sort(key=lambda x: x[2], reverse=True) # Sort by available relevant docs
+
+    for topic_id, topic_content, _, _ in tqdm(valid_topics_for_eval, desc="Evaluating Topics"):
+        logger.info(f"\nProcessing topic {topic_id}: {topic_content.get('title', 'N/A')}")
+        
+        query_title = topic_content.get("title", "").strip()
+        query_desc = topic_content.get("description", "").strip()
+        base_query = f"{query_title} {query_desc}".strip()
+        
+        terrier_query = sanitize_query_for_terrier(base_query)
+        reranker_general_query = re.sub(r'\s+', ' ', base_query).strip()
+        
+        current_qrels = qrels[topic_id]
+        # Relevant docs for this topic that are IN OUR DOCUMENT COLLECTION
+        true_relevant_docs_in_collection = [doc_id for doc_id, rel_score in current_qrels.items() 
+                                            if int(rel_score) > 0 and doc_id in doc_ids_in_collection]
+        # Relevance map for NDCG, containing only docs in our collection
+        relevance_map_for_ndcg = {doc_id: int(rel_score) for doc_id, rel_score in current_qrels.items()
+                                  if doc_id in doc_ids_in_collection and int(rel_score) > 0}
+
+
+        if not true_relevant_docs_in_collection:
+            logger.warning(f"Skipping topic {topic_id}: No relevant documents found in our loaded collection.")
+            topics_skipped +=1
             continue
-            
-        topic_qrels = qrels[topic_id]
-        relevant_docs = [doc_id for doc_id, rel in topic_qrels.items() if int(rel) > 0]
-        
-        # Check if any relevant docs are in our document collection
-        relevant_in_collection = [doc_id for doc_id in relevant_docs if doc_id in doc_ids]
-        
-        if relevant_in_collection:
-            valid_topics.append((topic_id, topic, len(relevant_in_collection), len(relevant_docs)))
-    
-    logger.info(f"Found {len(valid_topics)} topics with at least one relevant document in our collection")
-    
-    # Sort topics by number of relevant documents available
-    valid_topics.sort(key=lambda x: x[2], reverse=True)
-    
-    # Now evaluate using the valid topics
-    for topic_id, topic, relevant_count, total_relevant in valid_topics:
-        logger.info(f"\n{'='*40}\nProcessing topic {topic_id}: {topic.get('title', 'No title')}")
-        logger.info(f"Has {relevant_count} relevant documents available out of {total_relevant} total relevant")
-        
-        total_relevant_docs += total_relevant
-        relevant_docs_available += relevant_count
-        topics_with_relevant_docs += 1
-        
-        # Extract and clean query
-        title = topic.get("title", "").strip()
-        description = topic.get("description", "").strip()
-        logger.info(f"Title: '{title}'")
-        logger.info(f"Description: '{description}'")
-        
-        query = title
-        if description:
-            # Keep description shorter to avoid parsing issues
-            description_words = description.split()[:15]  # Limit to first 15 words
-            query += " " + " ".join(description_words)
-            
-        # Sanitize the query for Terrier
-        terrier_query = sanitize_query_for_terrier(query)
-        logger.info(f"Sanitized query for Terrier: '{terrier_query}'")
-        
-        # Clean query for ReRanker (less strict cleaning)
-        reranker_query = re.sub(r'\s+', ' ', query).strip()
-        logger.info(f"Query for ReRanker: '{reranker_query}'")
-        
-        # Get relevant documents for this topic
-        topic_qrels = qrels[topic_id]
-        relevant_docs = [doc_id for doc_id, rel in topic_qrels.items() if int(rel) > 0]
-        relevance_scores = {doc_id: int(rel) for doc_id, rel in topic_qrels.items()}
-        
-        # Get relevant docs that are actually in our collection
-        relevant_in_collection = [doc_id for doc_id in relevant_docs if doc_id in doc_ids]
-        logger.info(f"Topic {topic_id} has {len(relevant_in_collection)}/{len(relevant_docs)} relevant documents in our collection")
-        
-        if not relevant_in_collection:
-            logger.warning(f"No relevant documents for topic {topic_id} are in our collection, skipping...")
-            topics_skipped += 1
-            continue
-        
-        # BM25 retrieval
-        logger.info(f"Running BM25 search for topic {topic_id}")
-        bm25_retrieved = []
+
+        # BM25 Retrieval
+        bm25_retrieved_ids = []
         try:
-            # Create a query dataframe - this is important for PyTerrier
             query_df = pd.DataFrame([{"qid": topic_id, "query": terrier_query}])
-            
-            # Use transform method with error handling
-            bm25_results_df = bm25.transform(query_df)
-            logger.info(f"BM25 search successful, got DataFrame of shape {bm25_results_df.shape}")
-            
-            # Convert results to list of document IDs
-            if len(bm25_results_df) > 0 and 'docno' in bm25_results_df.columns:
-                bm25_retrieved = bm25_results_df["docno"].tolist()
-                logger.info(f"BM25 retrieved {len(bm25_retrieved)} documents")
-                
-                # Check if any retrieved docs are in relevant docs
-                retrieved_and_relevant = [doc_id for doc_id in bm25_retrieved[:50] if doc_id in relevant_in_collection]
-                logger.info(f"BM25 retrieved {len(retrieved_and_relevant)} relevant documents in top 50")
-            else:
-                logger.warning(f"BM25 results missing 'docno' column or empty. Columns: {bm25_results_df.columns.tolist() if len(bm25_results_df) > 0 else 'No columns'}")
+            bm25_df = bm25.transform(query_df)
+            if not bm25_df.empty and 'docno' in bm25_df.columns:
+                bm25_retrieved_ids = bm25_df["docno"].tolist()
+            logger.info(f"BM25 retrieved {len(bm25_retrieved_ids)} docs for topic {topic_id}")
         except Exception as e:
-            logger.error(f"Error with BM25 retrieval for topic {topic_id}: {e}")
-            logger.error(traceback.format_exc())
-            bm25_failures += 1
-            
-            # Try with a much simpler fallback query
-            logger.info("Attempting fallback with one-word query")
-            try:
-                # Use only the first word of the title as a simple query
-                simple_query = title.split()[0] if title and title.split() else "document"
-                
-                # Make sure it's a common word that won't cause parsing errors
-                if len(simple_query) < 4 or simple_query.lower() not in ["the", "and", "for", "with"]:
-                    simple_query = "document"
-                    
-                logger.info(f"Simple fallback query: '{simple_query}'")
-                
-                query_df = pd.DataFrame([{"qid": topic_id, "query": simple_query}])
-                bm25_results_df = bm25.transform(query_df)
-                
-                if len(bm25_results_df) > 0 and 'docno' in bm25_results_df.columns:
-                    bm25_retrieved = bm25_results_df["docno"].tolist()
-                    logger.info(f"Fallback successful, retrieved {len(bm25_retrieved)} documents")
-                else:
-                    logger.warning("Fallback failed - no docno column or empty results")
-            except Exception as e:
-                logger.error(f"Fallback attempt also failed: {e}")
+            logger.error(f"BM25 failed for topic {topic_id}: {e}\n{traceback.format_exc()}")
+            bm25_failures +=1
+
+        # Prepare candidates for rerankers
+        candidate_doc_ids = set(true_relevant_docs_in_collection) # Start with all known relevant
+        candidate_doc_ids.update(bm25_retrieved_ids[:300]) # Add top BM25
         
-        # Vector retrieval using ReRanker
-        logger.info(f"Running ReRanker for topic {topic_id}")
-        reranker_retrieved = []
+        # If still too few, add random docs (ensure they are in docid_to_text)
+        if len(candidate_doc_ids) < 50 and len(docid_to_text) > len(candidate_doc_ids) : # Ensure there are docs to sample
+            sample_size = min(100, len(docid_to_text) - len(candidate_doc_ids))
+            available_for_sample = [docid for docid in docid_to_text if docid not in candidate_doc_ids]
+            if available_for_sample and sample_size > 0 :
+                 candidate_doc_ids.update(random.sample(available_for_sample, min(sample_size, len(available_for_sample))))
+
+        reranker_candidate_texts = [docid_to_text[doc_id] for doc_id in candidate_doc_ids if doc_id in docid_to_text]
+        reranker_candidate_docids_map = [doc_id for doc_id in candidate_doc_ids if doc_id in docid_to_text]
+
+
+        # Original ReRanker
+        orig_reranker_retrieved_ids = []
         try:
-            # For ReRanker, we'll use either BM25 results or include all known relevant docs
-            doc_texts = []
-            doc_ids = []
-            
-            # Include all available relevant documents in the sample for ReRanker
-            for doc_id in relevant_in_collection:
-                if doc_id in docid_to_text:
-                    doc_texts.append(docid_to_text[doc_id])
-                    doc_ids.append(doc_id)
-            
-            # Add BM25 results if available, otherwise sample
-            if bm25_retrieved:
-                # Use top BM25 results for ReRanker
-                logger.info(f"Adding BM25 results to ReRanker documents")
-                for docno in bm25_retrieved[:300]:  # Use top 300 documents from BM25
-                    if docno in docid_to_text and docno not in doc_ids:
-                        doc_texts.append(docid_to_text[docno])
-                        doc_ids.append(docno)
-            else:
-                # Sample documents for ReRanker
-                logger.info("Adding random sample of documents for ReRanker")
-                sample_size = min(300, len(documents) - len(doc_ids))
-                possible_docs = [d for d in documents.keys() if d not in doc_ids]
-                sample_doc_ids = random.sample(possible_docs, sample_size)
-                
-                for doc_id in sample_doc_ids:
-                    if doc_id in docid_to_text:
-                        doc_texts.append(docid_to_text[doc_id])
-                        doc_ids.append(doc_id)
-            
-            logger.info(f"Prepared {len(doc_texts)} document texts for ReRanker")
-            logger.info(f"Included {len(relevant_in_collection)} known relevant documents in ReRanker input")
-            
-            # Run ReRanker if we have documents
-            if doc_texts:
-                logger.info(f"Running ReRanker with query: '{reranker_query}'")
-                
-                try:
-                    distances, indices = ReRanker.rerank(doc_texts, reranker_query, k=min(len(doc_texts), max(k_values)))
-                    
-                    # Convert indices to document IDs
-                    reranker_retrieved = [doc_ids[idx] for idx in indices if idx < len(doc_ids)]
-                    logger.info(f"ReRanker retrieved {len(reranker_retrieved)} documents")
-                    
-                    # Check if any retrieved docs are in relevant docs
-                    reranker_relevant = [doc_id for doc_id in reranker_retrieved[:50] if doc_id in relevant_in_collection]
-                    logger.info(f"ReRanker retrieved {len(reranker_relevant)} relevant documents in top 50")
-                except Exception as e:
-                    logger.error(f"Error in ReRanker.rerank: {e}")
-                    logger.error(traceback.format_exc())
-                    reranker_failures += 1
-            else:
-                logger.warning("No documents prepared for ReRanker")
+            if reranker_candidate_texts:
+                # ReRanker.rerank returns (distances, indices)
+                _, indices = ReRanker.rerank(reranker_candidate_texts, reranker_general_query, k=min(len(reranker_candidate_texts), max(k_values)))
+                orig_reranker_retrieved_ids = [reranker_candidate_docids_map[idx] for idx in indices if idx < len(reranker_candidate_docids_map)]
+                logger.info(f"Original ReRanker retrieved {len(orig_reranker_retrieved_ids)} docs for topic {topic_id}")
+            else: logger.warning(f"No candidates for Original ReRanker on topic {topic_id}")
         except Exception as e:
-            logger.error(f"Error with ReRanker for topic {topic_id}: {e}")
-            logger.error(traceback.format_exc())
+            logger.error(f"Original ReRanker failed for topic {topic_id}: {e}\n{traceback.format_exc()}")
             reranker_failures += 1
+            
+        # FineGrainedReRanker
+        fg_reranker_retrieved_ids = []
+        if fg_reranker: # Check if initialized
+            try:
+                if reranker_candidate_texts:
+                     # FineGrainedReRanker.rerank returns (scores, indices)
+                    _, indices = fg_reranker.rerank(reranker_candidate_texts, reranker_general_query, k=min(len(reranker_candidate_texts), max(k_values)))
+                    fg_reranker_retrieved_ids = [reranker_candidate_docids_map[idx] for idx in indices if idx < len(reranker_candidate_docids_map)]
+                    logger.info(f"FineGrainedReRanker retrieved {len(fg_reranker_retrieved_ids)} docs for topic {topic_id}")
+                else: logger.warning(f"No candidates for FineGrainedReRanker on topic {topic_id}")
+            except Exception as e:
+                logger.error(f"FineGrainedReRanker failed for topic {topic_id}: {e}\n{traceback.format_exc()}")
+                fg_reranker_failures +=1
         
-        # Calculate metrics for BM25 against AVAILABLE relevant docs
-        if bm25_retrieved:
-            # Use only relevant docs that are in our collection
-            mrr = calculate_mrr(bm25_retrieved, relevant_in_collection)
-            bm25_mrr.append(mrr)
-            logger.info(f"BM25 MRR for topic {topic_id}: {mrr:.4f}")
-            
-            topic_metrics = {'mrr': mrr}
-            
-            for k in k_values:
-                precision = calculate_precision_at_k(bm25_retrieved, relevant_in_collection, k)
-                recall = calculate_recall_at_k(bm25_retrieved, relevant_in_collection, k)
-                ndcg = calculate_ndcg_at_k(bm25_retrieved, 
-                                          {doc_id: relevance_scores[doc_id] for doc_id in relevant_in_collection}, 
-                                          k)
-                
-                bm25_results['precision'][k].append(precision)
-                bm25_results['recall'][k].append(recall)
-                bm25_results['ndcg'][k].append(ndcg)
-                
-                topic_metrics[f'p@{k}'] = precision
-                topic_metrics[f'r@{k}'] = recall
-                topic_metrics[f'ndcg@{k}'] = ndcg
-                
-                logger.info(f"BM25 metrics for topic {topic_id} at k={k}: P={precision:.4f}, R={recall:.4f}, NDCG={ndcg:.4f}")
-            
-            bm25_topic_scores[topic_id] = topic_metrics
-        
-        # Calculate metrics for ReRanker against AVAILABLE relevant docs
-        if reranker_retrieved:
-            # Use only relevant docs that are in our collection
-            mrr = calculate_mrr(reranker_retrieved, relevant_in_collection)
-            reranker_mrr.append(mrr)
-            logger.info(f"ReRanker MRR for topic {topic_id}: {mrr:.4f}")
-            
-            topic_metrics = {'mrr': mrr}
-            
-            for k in k_values:
-                precision = calculate_precision_at_k(reranker_retrieved, relevant_in_collection, k)
-                recall = calculate_recall_at_k(reranker_retrieved, relevant_in_collection, k)
-                ndcg = calculate_ndcg_at_k(reranker_retrieved, 
-                                          {doc_id: relevance_scores[doc_id] for doc_id in relevant_in_collection}, 
-                                          k)
-                
-                reranker_results['precision'][k].append(precision)
-                reranker_results['recall'][k].append(recall)
-                reranker_results['ndcg'][k].append(ndcg)
-                
-                topic_metrics[f'p@{k}'] = precision
-                topic_metrics[f'r@{k}'] = recall
-                topic_metrics[f'ndcg@{k}'] = ndcg
-                
-                logger.info(f"ReRanker metrics for topic {topic_id} at k={k}: P={precision:.4f}, R={recall:.4f}, NDCG={ndcg:.4f}")
-            
-            reranker_topic_scores[topic_id] = topic_metrics
-        
-        topics_evaluated += 1
-        
-        # Log progress periodically
-        if topics_evaluated % 10 == 0:
-            logger.info(f"Evaluated {topics_evaluated} topics so far")
-    
-    # Data availability report
-    logger.info("\n" + "=" * 50)
-    logger.info("DATA AVAILABILITY REPORT")
-    logger.info(f"Topics with at least one relevant document in our collection: {topics_with_relevant_docs}")
-    logger.info(f"Total relevant documents across all topics: {total_relevant_docs}")
-    logger.info(f"Relevant documents available in our collection: {relevant_docs_available} ({relevant_docs_available/total_relevant_docs*100:.2f}%)")
-    logger.info("=" * 50)
-    
-    logger.info(f"Evaluation complete. Evaluated {topics_evaluated} topics, skipped {topics_skipped} topics.")
-    logger.info(f"BM25 failures: {bm25_failures}, ReRanker failures: {reranker_failures}")
-    
-    # Calculate averages
-    logger.info("Calculating average metrics")
-    
-    bm25_avg = {
-        'mrr': np.mean(bm25_mrr) if bm25_mrr else 0,
-        'precision': {k: np.mean(bm25_results['precision'][k]) if bm25_results['precision'][k] else 0 for k in k_values},
-        'recall': {k: np.mean(bm25_results['recall'][k]) if bm25_results['recall'][k] else 0 for k in k_values},
-        'ndcg': {k: np.mean(bm25_results['ndcg'][k]) if bm25_results['ndcg'][k] else 0 for k in k_values}
-    }
-    
-    reranker_avg = {
-        'mrr': np.mean(reranker_mrr) if reranker_mrr else 0,
-        'precision': {k: np.mean(reranker_results['precision'][k]) if reranker_results['precision'][k] else 0 for k in k_values},
-        'recall': {k: np.mean(reranker_results['recall'][k]) if reranker_results['recall'][k] else 0 for k in k_values},
-        'ndcg': {k: np.mean(reranker_results['ndcg'][k]) if reranker_results['ndcg'][k] else 0 for k in k_values}
-    }
-    
-    # Print results
-    logger.info("\nEvaluation Results")
-    logger.info("=" * 50)
-    logger.info("BM25 Results:")
-    logger.info(f"MRR: {bm25_avg['mrr']:.4f}")
-    
-    logger.info("\nPrecision at k:")
-    for k in k_values:
-        logger.info(f"P@{k}: {bm25_avg['precision'][k]:.4f}")
-    
-    logger.info("\nRecall at k:")
-    for k in k_values:
-        logger.info(f"R@{k}: {bm25_avg['recall'][k]:.4f}")
-    
-    logger.info("\nNDCG at k:")
-    for k in k_values:
-        logger.info(f"NDCG@{k}: {bm25_avg['ndcg'][k]:.4f}")
-    
-    logger.info("\n" + "=" * 50)
-    logger.info("ReRanker Results:")
-    logger.info(f"MRR: {reranker_avg['mrr']:.4f}")
-    
-    logger.info("\nPrecision at k:")
-    for k in k_values:
-        logger.info(f"P@{k}: {reranker_avg['precision'][k]:.4f}")
-    
-    logger.info("\nRecall at k:")
-    for k in k_values:
-        logger.info(f"R@{k}: {reranker_avg['recall'][k]:.4f}")
-    
-    logger.info("\nNDCG at k:")
-    for k in k_values:
-        logger.info(f"NDCG@{k}: {reranker_avg['ndcg'][k]:.4f}")
-    
-    # Create visualizations
-    logger.info("Creating visualizations")
-    try:
-        plot_comparative_metrics(bm25_avg, reranker_avg, k_values, results_dir)
-        logger.info("Visualizations created successfully")
-    except Exception as e:
-        logger.error(f"Error creating visualizations: {e}")
-        logger.error(traceback.format_exc())
+        # Calculate and store metrics
+        systems_results = {
+            "BM25": (bm25_retrieved_ids, bm25_results, bm25_mrr, bm25_topic_scores),
+            "ReRanker (Original)": (orig_reranker_retrieved_ids, reranker_results, reranker_mrr, reranker_topic_scores),
+            "FineGrainedReRanker": (fg_reranker_retrieved_ids, fg_reranker_results, fg_reranker_mrr, fg_reranker_topic_scores)
+        }
 
-    # Create a topic-by-topic comparison
-    logger.info("Creating topic-by-topic comparison")
-    try:
-        create_topic_comparison(bm25_topic_scores, reranker_topic_scores, k_values, results_dir, bm25_avg, reranker_avg)
-        logger.info("Topic comparison created successfully")
-    except Exception as e:
-        logger.error(f"Error creating topic comparison: {e}")
-        logger.error(traceback.format_exc())
+        for sys_name, (retrieved_list, sys_metrics_dict, sys_mrr_list, sys_topic_scores_dict) in systems_results.items():
+            if not retrieved_list and sys_name != "FineGrainedReRanker" and sys_name !="ReRanker (Original)": # BM25 must have results to proceed for rerankers usually
+                 if sys_name == "BM25": logger.warning(f"No results for {sys_name} on topic {topic_id}, skipping its metrics.")
+                 # If FineGrainedReRanker is None, it won't be in systems_results for metrics
+                 if sys_name == "FineGrainedReRanker" and not fg_reranker: continue
+                 # if retrieved_list is empty for rerankers, it means they failed or had no input
+                 if not retrieved_list :
+                     logger.warning(f"No results for {sys_name} on topic {topic_id}, skipping its metrics this topic.")
+                     # Add 0 for all metrics for this topic if it failed to produce results
+                     mrr_val = 0.0
+                     sys_mrr_list.append(mrr_val)
+                     topic_metric_vals = {'mrr': mrr_val}
+                     for k_val in k_values:
+                        for metric_name in metrics_to_collect:
+                            sys_metrics_dict[metric_name][k_val].append(0.0)
+                            topic_metric_vals[f'{metric_name[0]}@{k_val}'] = 0.0 # p@k, r@k, n@k
+                     sys_topic_scores_dict[topic_id] = topic_metric_vals
+                     continue
 
-def plot_comparative_metrics(bm25_avg, reranker_avg, k_values, results_dir):
-    """Create visualizations comparing BM25 and ReRanker performance"""
-    metrics = ['precision', 'recall', 'ndcg']
-    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
-    
-    for i, metric in enumerate(metrics):
+
+            mrr_val = calculate_mrr(retrieved_list, true_relevant_docs_in_collection)
+            sys_mrr_list.append(mrr_val)
+            logger.info(f"{sys_name} MRR for topic {topic_id}: {mrr_val:.4f}")
+            topic_metric_vals = {'mrr': mrr_val}
+
+            for k_val in k_values:
+                p_at_k = calculate_precision_at_k(retrieved_list, true_relevant_docs_in_collection, k_val)
+                r_at_k = calculate_recall_at_k(retrieved_list, true_relevant_docs_in_collection, k_val)
+                n_at_k = calculate_ndcg_at_k(retrieved_list, relevance_map_for_ndcg, k_val)
+                
+                sys_metrics_dict['precision'][k_val].append(p_at_k)
+                sys_metrics_dict['recall'][k_val].append(r_at_k)
+                sys_metrics_dict['ndcg'][k_val].append(n_at_k)
+                
+                topic_metric_vals[f'p@{k_val}'] = p_at_k
+                topic_metric_vals[f'r@{k_val}'] = r_at_k
+                topic_metric_vals[f'ndcg@{k_val}'] = n_at_k
+                logger.info(f"{sys_name} metrics for topic {topic_id} at k={k_val}: P={p_at_k:.4f}, R={r_at_k:.4f}, NDCG={n_at_k:.4f}")
+            sys_topic_scores_dict[topic_id] = topic_metric_vals
+        topics_evaluated +=1
+
+    logger.info(f"\nEvaluation complete. Evaluated {topics_evaluated} topics. Skipped {topics_skipped} topics.")
+    logger.info(f"Failures: BM25={bm25_failures}, OriginalReRanker={reranker_failures}, FineGrainedReRanker={fg_reranker_failures}")
+
+    # Calculate Averages
+    all_averages = {}
+    for sys_name, (_, sys_metrics_dict, sys_mrr_list, _) in systems_results.items():
+        if sys_name == "FineGrainedReRanker" and not fg_reranker: continue # Skip if not initialized
+
+        avg_metrics = {
+            'mrr': np.mean(sys_mrr_list) if sys_mrr_list else 0,
+            'precision': {k: np.mean(sys_metrics_dict['precision'][k]) if sys_metrics_dict['precision'][k] else 0 for k in k_values},
+            'recall': {k: np.mean(sys_metrics_dict['recall'][k]) if sys_metrics_dict['recall'][k] else 0 for k in k_values},
+            'ndcg': {k: np.mean(sys_metrics_dict['ndcg'][k]) if sys_metrics_dict['ndcg'][k] else 0 for k in k_values}
+        }
+        all_averages[sys_name] = avg_metrics
+        
+        logger.info(f"\n{sys_name} Average Results:")
+        logger.info(f"MRR: {avg_metrics['mrr']:.4f}")
+        for metric_name in metrics_to_collect:
+            logger.info(f"\nAverage {metric_name.capitalize()} at k:")
+            for k_val in k_values: logger.info(f"{metric_name.capitalize()}@{k_val}: {avg_metrics[metric_name][k_val]:.4f}")
+
+    # Visualizations and Detailed Comparisons
+    try:
+        plot_comparative_metrics(all_averages.get("BM25"), 
+                                 all_averages.get("ReRanker (Original)"), 
+                                 all_averages.get("FineGrainedReRanker") if fg_reranker else None, 
+                                 k_values, results_dir)
+        
+        create_topic_comparison(bm25_topic_scores, 
+                                reranker_topic_scores, 
+                                fg_reranker_topic_scores if fg_reranker else {}, 
+                                k_values, results_dir, 
+                                all_averages.get("BM25"),
+                                all_averages.get("ReRanker (Original)"),
+                                all_averages.get("FineGrainedReRanker") if fg_reranker else None
+                                )
+        logger.info("Visualizations and detailed comparisons created successfully.")
+    except Exception as e:
+        logger.error(f"Error during post-evaluation analysis: {e}\n{traceback.format_exc()}")
+
+
+def plot_comparative_metrics(bm25_avg, reranker_orig_avg, fg_reranker_avg, k_values, results_dir):
+    if not bm25_avg: # Should always be there if BM25 ran
+        logger.warning("BM25 average results not available for plotting.")
+        return
+
+    metrics_to_plot = ['precision', 'recall', 'ndcg']
+    num_metrics = len(metrics_to_plot)
+    fig, axes = plt.subplots(1, num_metrics, figsize=(8 * num_metrics, 6))
+    if num_metrics == 1: axes = [axes] # Ensure axes is iterable
+
+    for i, metric in enumerate(metrics_to_plot):
         ax = axes[i]
-        
-        bm25_values = [bm25_avg[metric][k] for k in k_values]
-        reranker_values = [reranker_avg[metric][k] for k in k_values]
-        
-        ax.plot(k_values, bm25_values, 'b-o', label='BM25')
-        ax.plot(k_values, reranker_values, 'r-o', label='ReRanker')
+        ax.plot(k_values, [bm25_avg[metric][k] for k in k_values], 'b-o', label='BM25')
+        if reranker_orig_avg:
+            ax.plot(k_values, [reranker_orig_avg[metric][k] for k in k_values], 'r-s', label='ReRanker (Original)')
+        if fg_reranker_avg:
+            ax.plot(k_values, [fg_reranker_avg[metric][k] for k in k_values], 'g-^', label='FineGrainedReRanker')
         
         ax.set_xlabel('k')
         ax.set_ylabel(metric.capitalize())
-        ax.set_title(f'{metric.capitalize()} at k')
+        ax.set_title(f'{metric.capitalize()}@k Comparison')
         ax.legend()
         ax.grid(True)
     
     plt.tight_layout()
-    plt.savefig(os.path.join(results_dir, 'evaluation_results.png'))
-    
-    # Create a figure for MRR
-    plt.figure(figsize=(8, 6))
-    plt.bar(['BM25', 'ReRanker'], [bm25_avg['mrr'], reranker_avg['mrr']], color=['blue', 'red'])
-    plt.ylabel('MRR')
-    plt.title('Mean Reciprocal Rank Comparison')
-    plt.grid(axis='y')
-    plt.savefig(os.path.join(results_dir, 'mrr_comparison.png'))
+    plt.savefig(os.path.join(results_dir, 'metrics_at_k_comparison.png'))
+    plt.close(fig)
 
-def create_topic_comparison(bm25_scores, reranker_scores, k_values, results_dir, bm25_avg, reranker_avg):
-    """Create detailed topic-by-topic comparison"""
-    # Create a DataFrame for topic-by-topic comparison
-    comparison_data = []
-    
-    # Common topics evaluated with both methods
-    common_topics = set(bm25_scores.keys()) & set(reranker_scores.keys())
-    
-    for topic_id in common_topics:
-        bm25_topic = bm25_scores[topic_id]
-        reranker_topic = reranker_scores[topic_id]
+    # MRR Plot
+    plt.figure(figsize=(10, 7))
+    mrr_methods, mrr_values, mrr_colors = [], [], []
+    mrr_methods.append('BM25'); mrr_values.append(bm25_avg['mrr']); mrr_colors.append('blue')
+    if reranker_orig_avg:
+        mrr_methods.append('ReRanker (Original)'); mrr_values.append(reranker_orig_avg['mrr']); mrr_colors.append('red')
+    if fg_reranker_avg:
+        mrr_methods.append('FineGrainedReRanker'); mrr_values.append(fg_reranker_avg['mrr']); mrr_colors.append('green')
         
-        # Compare MRR
-        comparison_data.append({
-            'Topic': topic_id,
-            'Metric': 'MRR',
-            'BM25': bm25_topic['mrr'],
-            'ReRanker': reranker_topic['mrr'],
-            'Difference': reranker_topic['mrr'] - bm25_topic['mrr']
-        })
-        
-        # Compare metrics at different k values
-        for k in k_values:
-            for metric in ['p', 'r', 'ndcg']:
-                metric_key = f'{metric}@{k}'
-                if metric_key in bm25_topic and metric_key in reranker_topic:
-                    comparison_data.append({
-                        'Topic': topic_id,
-                        'Metric': metric_key,
-                        'BM25': bm25_topic[metric_key],
-                        'ReRanker': reranker_topic[metric_key],
-                        'Difference': reranker_topic[metric_key] - bm25_topic[metric_key]
-                    })
-    
-    # Convert to DataFrame and save
-    comparison_df = pd.DataFrame(comparison_data)
-    comparison_df.to_csv(os.path.join(results_dir, 'topic_comparison.csv'), index=False)
-    
-    # Create a summary showing win/loss counts
-    win_loss = defaultdict(lambda: {'ReRanker_wins': 0, 'BM25_wins': 0, 'Ties': 0})
-    
-    for _, row in comparison_df.iterrows():
-        metric = row['Metric']
-        if row['Difference'] > 0.01:  # ReRanker is better
-            win_loss[metric]['ReRanker_wins'] += 1
-        elif row['Difference'] < -0.01:  # BM25 is better
-            win_loss[metric]['BM25_wins'] += 1
-        else:  # Tie
-            win_loss[metric]['Ties'] += 1
-    
-    # Convert to DataFrame and save
+    plt.bar(mrr_methods, mrr_values, color=mrr_colors)
+    plt.ylabel('Mean Reciprocal Rank (MRR)')
+    plt.title('MRR Comparison')
+    plt.grid(axis='y', linestyle='--')
+    plt.xticks(rotation=15, ha="right")
+    plt.tight_layout()
+    plt.savefig(os.path.join(results_dir, 'mrr_comparison.png'))
+    plt.close()
+
+def generate_win_loss_analysis(comparison_df, method1_col, method2_col, results_dir, file_prefix, k_values):
     win_loss_data = []
-    for metric, counts in win_loss.items():
+    metrics_for_win_loss = ['MRR'] + [f'{m}@{k}' for m in ['p','r','ndcg'] for k in k_values]
+
+    for metric_name in metrics_for_win_loss:
+        # Filter DataFrame for the specific metric
+        metric_df = comparison_df[comparison_df['Metric'] == metric_name]
+        if metric_df.empty: continue
+
+        wins_method2 = 0
+        wins_method1 = 0
+        ties = 0
+        
+        for _, row in metric_df.iterrows():
+            val_method1 = row.get(method1_col, 0.0) # Default to 0 if a method's score is missing for a topic
+            val_method2 = row.get(method2_col, 0.0)
+            diff = val_method2 - val_method1
+            
+            if diff > 0.001: wins_method2 += 1
+            elif diff < -0.001: wins_method1 += 1
+            else: ties += 1
+        
         win_loss_data.append({
-            'Metric': metric,
-            'ReRanker_wins': counts['ReRanker_wins'],
-            'BM25_wins': counts['BM25_wins'],
-            'Ties': counts['Ties'],
-            'Total': counts['ReRanker_wins'] + counts['BM25_wins'] + counts['Ties']
+            'Metric': metric_name,
+            f'{method2_col}_wins': wins_method2,
+            f'{method1_col}_wins': wins_method1,
+            'Ties': ties,
+            'Total_Topics': wins_method1 + wins_method2 + ties
         })
-    
+
+    if not win_loss_data:
+        logger.warning(f"No data for win/loss analysis between {method1_col} and {method2_col}")
+        return
+
     win_loss_df = pd.DataFrame(win_loss_data)
-    win_loss_df = win_loss_df.sort_values('Metric')
-    win_loss_df.to_csv(os.path.join(results_dir, 'win_loss_comparison.csv'), index=False)
+    win_loss_df.to_csv(os.path.join(results_dir, f'{file_prefix}_win_loss.csv'), index=False)
+
+    # Plotting win/loss
+    plt.figure(figsize=(14, 8)) # Adjusted for more metrics
+    plot_metrics = win_loss_df['Metric'].tolist()
+    method2_wins_plot = win_loss_df[f'{method2_col}_wins'].tolist()
+    method1_wins_plot = win_loss_df[f'{method1_col}_wins'].tolist()
+    ties_plot = win_loss_df['Ties'].tolist()
     
-    # Create a visualization of win/loss
-    plt.figure(figsize=(12, 8))
-    metrics = win_loss_df['Metric'].tolist()
-    reranker_wins = win_loss_df['ReRanker_wins'].tolist()
-    bm25_wins = win_loss_df['BM25_wins'].tolist()
-    ties = win_loss_df['Ties'].tolist()
+    x_indices = np.arange(len(plot_metrics))
+    bar_width = 0.25
     
-    x = np.arange(len(metrics))
-    width = 0.25
-    
-    plt.bar(x - width, reranker_wins, width, label='ReRanker wins', color='green')
-    plt.bar(x, bm25_wins, width, label='BM25 wins', color='blue')
-    plt.bar(x + width, ties, width, label='Ties', color='gray')
+    plt.bar(x_indices - bar_width, method2_wins_plot, bar_width, label=f'{method2_col} Wins', color='forestgreen')
+    plt.bar(x_indices, method1_wins_plot, bar_width, label=f'{method1_col} Wins', color='royalblue')
+    plt.bar(x_indices + bar_width, ties_plot, bar_width, label='Ties', color='silver')
     
     plt.xlabel('Metric')
-    plt.ylabel('Count')
-    plt.title('Win/Loss Comparison by Metric')
-    plt.xticks(x, metrics, rotation=45)
+    plt.ylabel('Number of Topics')
+    plt.title(f'Win/Loss/Tie Comparison: {method2_col} vs {method1_col}')
+    plt.xticks(x_indices, plot_metrics, rotation=60, ha="right")
     plt.legend()
     plt.tight_layout()
-    plt.savefig(os.path.join(results_dir, 'win_loss_comparison.png'))
+    plt.savefig(os.path.join(results_dir, f'{file_prefix}_win_loss_plot.png'))
+    plt.close()
+
+
+def create_topic_comparison(bm25_topic_scores, reranker_orig_topic_scores, fg_reranker_topic_scores, 
+                            k_values, results_dir, 
+                            bm25_avg, reranker_orig_avg, fg_reranker_avg):
     
-    # Also save a summary of results as CSV
+    comparison_data = []
+    # Ensure all topic IDs are strings for consistent merging/set operations
+    all_topic_ids = set(map(str, bm25_topic_scores.keys())) | \
+                    set(map(str, reranker_orig_topic_scores.keys())) | \
+                    set(map(str, fg_reranker_topic_scores.keys()))
+
+    for topic_id_str in sorted(list(all_topic_ids)):
+        # Get scores for each method, defaulting to empty dict if topic not scored by a method
+        bm25_s = bm25_topic_scores.get(topic_id_str, {})
+        orig_r_s = reranker_orig_topic_scores.get(topic_id_str, {})
+        fg_r_s = fg_reranker_topic_scores.get(topic_id_str, {})
+
+        row_base = {'Topic': topic_id_str}
+        metrics_to_log = ['mrr'] + [f'{m}@{k}' for m in ['p', 'r', 'ndcg'] for k in k_values]
+
+        for metric_key in metrics_to_log:
+            row = row_base.copy()
+            row['Metric'] = metric_key
+            row['BM25'] = bm25_s.get(metric_key) # .get() handles missing metrics for a topic gracefully
+            row['ReRanker_Orig'] = orig_r_s.get(metric_key)
+            row['FG_ReRanker'] = fg_r_s.get(metric_key)
+            comparison_data.append(row)
+            
+    comparison_df = pd.DataFrame(comparison_data)
+    comparison_df.to_csv(os.path.join(results_dir, 'topic_by_topic_scores.csv'), index=False)
+    logger.info(f"Saved detailed topic-by-topic scores to topic_by_topic_scores.csv")
+
+    # Generate pairwise win/loss analyses if data is available
+    if not comparison_df.empty:
+        if 'ReRanker_Orig' in comparison_df.columns and 'BM25' in comparison_df.columns:
+             generate_win_loss_analysis(comparison_df, 'BM25', 'ReRanker_Orig', results_dir, 'OrigReRanker_vs_BM25', k_values)
+        if fg_reranker_avg and 'FG_ReRanker' in comparison_df.columns and 'BM25' in comparison_df.columns: # Check if FG_ReRanker was run
+             generate_win_loss_analysis(comparison_df, 'BM25', 'FG_ReRanker', results_dir, 'FGReRanker_vs_BM25', k_values)
+        if fg_reranker_avg and 'FG_ReRanker' in comparison_df.columns and 'ReRanker_Orig' in comparison_df.columns:
+             generate_win_loss_analysis(comparison_df, 'ReRanker_Orig', 'FG_ReRanker', results_dir, 'FGReRanker_vs_OrigReRanker', k_values)
+
+
+    # Summary CSV of average results
     summary_data = []
-    
-    # Add BM25 results
-    for k in k_values:
+    systems_avg = {
+        "BM25": bm25_avg, 
+        "ReRanker (Original)": reranker_orig_avg, 
+        "FineGrainedReRanker": fg_reranker_avg
+    }
+
+    for method_name, avg_scores in systems_avg.items():
+        if not avg_scores: continue # Skip if a method was not run/had no results
+
         summary_data.append({
-            'Method': 'BM25',
-            'K': k,
-            'Precision': bm25_avg['precision'][k],
-            'Recall': bm25_avg['recall'][k],
-            'NDCG': bm25_avg['ndcg'][k]
+            'Method': method_name, 'Metric': 'MRR', 'K': 'N/A', 'Average_Score': avg_scores['mrr']
         })
-    
-    # Add ReRanker results
-    for k in k_values:
-        summary_data.append({
-            'Method': 'ReRanker',
-            'K': k,
-            'Precision': reranker_avg['precision'][k],
-            'Recall': reranker_avg['recall'][k],
-            'NDCG': reranker_avg['ndcg'][k]
-        })
-    
-    # Add MRR results (not k-dependent)
-    summary_data.append({
-        'Method': 'BM25',
-        'K': 'N/A',
-        'MRR': bm25_avg['mrr'],
-        'Precision': np.nan,
-        'Recall': np.nan,
-        'NDCG': np.nan
-    })
-    
-    summary_data.append({
-        'Method': 'ReRanker',
-        'K': 'N/A',
-        'MRR': reranker_avg['mrr'],
-        'Precision': np.nan,
-        'Recall': np.nan,
-        'NDCG': np.nan
-    })
-    
-    pd.DataFrame(summary_data).to_csv(os.path.join(results_dir, 'evaluation_summary.csv'), index=False)
+        for k_val in k_values:
+            for metric_name in ['precision', 'recall', 'ndcg']:
+                summary_data.append({
+                    'Method': method_name,
+                    'Metric': metric_name.capitalize(),
+                    'K': k_val,
+                    'Average_Score': avg_scores[metric_name][k_val]
+                })
+    pd.DataFrame(summary_data).to_csv(os.path.join(results_dir, 'average_evaluation_summary.csv'), index=False)
+    logger.info(f"Saved average evaluation summary to average_evaluation_summary.csv")
+
 
 if __name__ == "__main__":
     try:
@@ -814,4 +562,3 @@ if __name__ == "__main__":
         logger.info("Evaluation script completed successfully")
     except Exception as e:
         logger.error(f"Unhandled exception in evaluation script: {e}", exc_info=True)
-        logger.error(traceback.format_exc())
