@@ -1,48 +1,38 @@
 
+from src.vector.bm25 import create_index
 from src.data.reader import parse_data
-import json
-import pandas as pd
+from src.vector.indexer import ReRanker
 import pyterrier as pt
-from src.vector.indexer import *
-from sentence_transformers import SentenceTransformer
-import faiss
-import numpy as np
+import pandas as pd
 
 
 if not pt.started():
     pt.init()
     
-# # Example usage:
-# folder = 'data/ft/all'
-# # parsed_data = parse_documents(folder)
 
-# topic_path = "/home/alpfischer/Devr-iQuery/data/query-relJudgments/q-topics-org-SET2.txt"
-# # topis = parse_topics(topic_path)
-# # qrels = parse_qrel_judgements("/home/alpfischer/Devr-iQuery/data/query-relJudgments/qrel_301-350_complete.txt")
-# data = parse_data()
+index_folder = "./index"
+query = "Identify organizations that participate in international criminal\nactivity, the activity, and, if possible, collaborating organizations\nand the countries involved."
+data = parse_data()
+docs_df = pd.DataFrame(data["documents"].values())
+indexref = create_index(docs_df, index_folder=index_folder)
+bm25 = pt.terrier.BatchRetrieve(indexref, wmodel="BM25", num_results=200)
+results = bm25.search(query)
+print("BM25 Results:")
+print(results)
 
-# docs_df = pd.DataFrame(data["documents"].values())
-# docs = pd.DataFrame([
-#     {"docno": "doc1", "text": "PyTerrier is a great toolkit for IR."},
-#     {"docno": "doc2", "text": "BM25 is a ranking function used in IR."},
-#     {"docno": "doc3", "text": "This document is about information retrieval."}
-# ])
-
-# def create_index(data):
-    
-
-#     indexer = pt.IterDictIndexer('./index')
-
-#     # Thisws creates an index with the default settings (including BM25-compatible indexing)
-#     indexref = indexer.index(docs_df.to_dict(orient="records"))
-
-#     return indexref
-
-# indexref = create_index(docs_df)
-# bm25 = pt.terrier.Retriever(indexref, wmodel="BM25")
-
-# results = bm25.search("information retrieval")
-# print(results[['docno', 'score']])
+docs_to_rerank = pd.merge(results, docs_df, on="docno", how="left")
+docs_to_rerank = docs_to_rerank[["docno", "text"]]
+reranked_d, reranked_indices  = ReRanker.rerank(docs_to_rerank["text"].tolist(), query, k=10)
+print("Reranked Results:")
+print(reranked_d, reranked_indices)
 
 
-model = SentenceTransformer('all-MiniLM-L6-v2')  # or any other model you prefer
+# create initial order of docnos and reranked docnos
+initial_order = docs_to_rerank["docno"].tolist()
+reranked_order = docs_to_rerank.iloc[reranked_indices]["docno"].tolist()
+
+
+a = 5
+
+
+
