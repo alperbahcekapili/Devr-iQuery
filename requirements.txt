@@ -1,3 +1,5 @@
 python-terrier
 pandas
 tqdm
+sentence-transformers
+faiss-gpu
