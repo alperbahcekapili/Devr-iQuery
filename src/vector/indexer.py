@@ -1,5 +1,6 @@
 
 
+import time
 import faiss
 from sentence_transformers import SentenceTransformer
 
@@ -41,10 +42,15 @@ class ReRanker:
         model = SentenceTransformer(model) # intfloat/e5-mistral-7b-instruct
         faiss_index = ReRanker.initialize(model)
         embeddings = ReRanker.generate_embeddings(model, documents)
+        start_time = time.time()
         ReRanker.store_documents(faiss_index, embeddings)
+        index_creation_duration = time.time() - start_time
+
         query_embedding = ReRanker.generate_embeddings(model, [query])
+        start_time = time.time()
         distances, indices = ReRanker.queryk(faiss_index, query_embedding, k=k)
-        return distances, indices[0]
+        faiss_retrieval_duration = time.time() - start_time
+        return distances, indices[0], faiss_retrieval_duration, index_creation_duration
     
 
 

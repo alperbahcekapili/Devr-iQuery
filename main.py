@@ -9,6 +9,7 @@ from src.vector.indexer import ReRanker
 import pyterrier as pt
 import pandas as pd
 import copy
+import time
 
 print("Starting UI")
 index_folder = "./index"
@@ -26,13 +27,22 @@ queries = list(map(lambda x: f"{x['number']}<>{x['description']}", queries_d.val
 import os
 if not pt.started():
     pt.init()
-    
+
+
+index_creation_duration = 0.0
+faiss_retrieval_duration = 0.0
+bm25_retrieval_duration = 0.0
+bm25_index_creation_duration = 0.0
+
 if not os.path.exists(index_folder):
     print("Creating new index")
+    start_time = time.time()
     indexref = create_index(docs_df, index_folder=index_folder)
+    bm25_index_creation_duration = time.time() - start_time
 else:
     print("Loading existing index")
     indexref = pt.IndexRef.of(index_folder)
+
 
 root = tk.Tk()
 selected_predefined_query = ""
@@ -248,12 +258,14 @@ def process_query():
     use_checks = use_checks_var.get()  # Get checkbox value
 
     bm25 = pt.terrier.BatchRetrieve(indexref, wmodel="BM25", num_results=bm25_limit)
+    start_time = time.time()
     results = bm25.search(query)
+    bm25_retrieval_duration = time.time() - start_time
 
     # Process query using ReRanker
     docs_to_rerank = pd.merge(results, docs_df, on="docno", how="left")
     docs_to_rerank = docs_to_rerank[["docno", "text"]]
-    reranked_d, reranked_indices = ReRanker.rerank(docs_to_rerank["text"].tolist(), query, model=dropdown_var.get(), k=int(num_var2.get()))
+    reranked_d, reranked_indices, faiss_retrieval_duration, index_creation_duration = ReRanker.rerank(docs_to_rerank["text"].tolist(), query, model=dropdown_var.get(), k=int(num_var2.get()))
 
     initial_order = docs_to_rerank["docno"].tolist()
     reranked_order = docs_to_rerank.iloc[reranked_indices]["docno"].tolist()
@@ -277,35 +289,40 @@ def process_query():
       col2_correctness = [True] * len(text_list)
 
     print("Retrieved Documents: ", text_list)
+
+    if is_predefined_query and use_checks:
+      col3_items = []
+      col3_correctness = []
+      for docno in query_qrels:
+          if query_qrels[docno] == "1":
+              try:
+                col3_items.append(f"Doc{docno}: {docs_df.loc[docs_df['docno'] == docno, 'text'].values[0]}")
+                col3_correctness.append(True)
+              except Exception as e:
+                  # means the docno is not in the docs_df
+                  print(e)
+                  continue
+              print("GT hit")
+
+      clear_list(col3, "Ground Truth Documents")
+      display_list_with_status(col3, "Ground Truth Documents", col3_items, col3_correctness)
+
+
     clear_list(col2, "Retrieved Documents")
     display_list_with_status(col2, "Retrieved Documents", text_list, col2_correctness)
 
 
 
     # also update the ground truth documents list
-    col3_items = []
-    col3_correctness = []
-    for docno in query_qrels:
-        if query_qrels[docno] == "1":
-            try:
-              col3_items.append(f"Doc{docno}: {docs_df.loc[docs_df['docno'] == docno, 'text'].values[0]}")
-              col3_correctness.append(True)
-            except Exception as e:
-                # means the docno is not in the docs_df
-                print(e)
-                continue
-            print("GT hit")
+   
     
-    clear_list(col3, "Ground Truth Documents")
-    display_list_with_status(col3, "Ground Truth Documents", col3_items, col3_correctness)
 
     # Update stats
     stats_value.set(f"""
-Faiss Index Creation Duration: {0.0} seconds
-Faiss Retrieval Duration: {0.0} seconds
-BM25 Retrieval Duration: {0.0} seconds
-BM25 Index Creation Duration: {0.0} seconds
-Query Metrics: Precision etc. 
+Faiss Index Creation Duration: {index_creation_duration:.5f} seconds
+Faiss Retrieval Duration: {faiss_retrieval_duration:.5f} seconds
+BM25 Retrieval Duration: {bm25_retrieval_duration:.5f} seconds
+BM25 Index Creation Duration: {bm25_index_creation_duration:.5f} seconds
     """)
     
     """# Update results in column 2
