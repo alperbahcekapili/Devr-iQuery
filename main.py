@@ -1,7 +1,10 @@
+import json
 import re
 import tkinter as tk
 from tkinter import ttk
 import tkinter.font as tkfont
+
+import requests
 from src.vector.indexer import ReRanker
 from src.vector.bm25 import clean_text, create_index
 from src.data.reader import parse_data
@@ -94,7 +97,7 @@ text_area.grid(row=4, column=0, columnspan=2, sticky="ew", pady=2)
 
 # Checkbox (fifth row)
 use_checks_var = tk.BooleanVar(value=False)
-use_checks = ttk.Checkbutton(col1, text="Use Checks", variable=use_checks_var)
+use_checks = ttk.Checkbutton(col1, text="Using Predefined Queries", variable=use_checks_var)
 use_checks.grid(row=5, column=0, columnspan=2, sticky="w", pady=5)
 
 # Buttons (sixth row)
@@ -171,7 +174,62 @@ Query Metrics: Precision etc.
 stats_label = tk.Label(col1, textvariable=stats_value, bg="#e0e0e0", anchor="w", justify="left")
 stats_label.grid(row=8, column=0, columnspan=2, sticky="ew")
 
-# ...existing code...
+# Add new text box for query results
+llm_response_text = tk.Text(col1, height=5, width=40, wrap="word")
+llm_response_text.grid(row=9, column=0, columnspan=2, sticky="ew", pady=10)
+llm_response_text.insert("1.0", "LLM answers results will appear here...")
+llm_response_text.config(state="disabled")  # Make it read-only
+
+def update_llm_response(text):
+    global llm_response_text
+    
+    
+    # Set up OpenAI API key
+    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+    if not GEMINI_API_KEY:
+        return
+    
+    # System and user prompts
+    system_prompt = """
+    You are a helpful assistant that can answer questions and help with tasks.
+    You are given a query and a list of relevant documents.
+    You need to answer the query based on the documents.
+    You need to return the answer in a concise and informative manner.
+    You need to return the answer in a markdown format.
+    You need to return the answer in a concise and informative manner.
+"""  # Replace with actual system prompt
+    user_query = text  # Using the text parameter passed to the function
+    
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
+
+    headers = {
+        'Content-Type': 'application/json'
+    }
+
+
+    data = {
+      "contents": [
+          {
+              "role": "user",  # This is your actual user query
+              "parts": [
+                  {
+                      "text": f"System Prompt: {system_prompt} \n User Query: {user_query}"
+                  }
+              ]
+          }
+      ]
+    }
+
+    response = requests.post(url, headers=headers, data=json.dumps(data))
+
+    response_json = response.json()
+    generated_text = response_json['candidates'][0]['content']['parts'][0]['text']
+    text = generated_text
+    llm_response_text.config(state="normal")
+    llm_response_text.delete("1.0", tk.END)
+    llm_response_text.insert("1.0", text)
+    llm_response_text.config(state="disabled")
 
 def show_full_content(title, content):
     win = tk.Toplevel(root)
@@ -309,6 +367,12 @@ def process_query():
     clear_list(col2, "Retrieved Documents")
     display_list_with_status(col2, "Retrieved Documents", text_list, col2_correctness)
 
+    to_send_query = f"""
+    Query: {query}
+    Retrieved Documents: {text_list}
+    """
+    update_llm_response(to_send_query)
+
 
 
     # also update the ground truth documents list
@@ -323,13 +387,4 @@ BM25 Retrieval Duration: {bm25_retrieval_duration:.5f} seconds
 BM25 Index Creation Duration: {bm25_index_creation_duration:.5f} seconds
     """)
     
-    """# Update results in column 2
-    for i, idx in enumerate(indices):
-        if i < len(col2_items):
-            col2_items[i] = col2_items[idx]
-            col2_correctness[i] = True  # You might want to implement proper correctness checking
-    
-    # Refresh the display
-    display_list_with_status(col2, "Retrieved Documents", col2_items, col2_correctness)
-"""
 root.mainloop()
