@@ -29,7 +29,7 @@ class ReRanker:
         return (distances, indices)
 
 
-    def rerank(documents, query, k=10):
+    def rerank(documents, query, model='all-MiniLM-L6-v2', k=10):
         """
         Rerank the documents based on the query using the index.
         :param documents: List of documents to rerank.
@@ -38,7 +38,7 @@ class ReRanker:
         :return: List of reranked documents.
         """
 
-        model = SentenceTransformer('intfloat/e5-mistral-7b-instruct')
+        model = SentenceTransformer(model) # intfloat/e5-mistral-7b-instruct
         faiss_index = ReRanker.initialize(model)
         embeddings = ReRanker.generate_embeddings(model, documents)
         ReRanker.store_documents(faiss_index, embeddings)
