@@ -32,4 +32,3 @@ reranked_order = docs_to_rerank.iloc[reranked_indices]["docno"].tolist()
 a = 5
 
 
-

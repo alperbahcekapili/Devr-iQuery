@@ -1,13 +1,14 @@
+import re
 import tkinter as tk
 from tkinter import ttk
 import tkinter.font as tkfont
 from src.vector.indexer import ReRanker
-from src.vector.bm25 import create_index
+from src.vector.bm25 import clean_text, create_index
 from src.data.reader import parse_data
 from src.vector.indexer import ReRanker
 import pyterrier as pt
 import pandas as pd
-
+import copy
 
 print("Starting UI")
 index_folder = "./index"
@@ -15,6 +16,11 @@ index_folder = "./index"
 print("Parsing data")
 data = parse_data()
 docs_df = pd.DataFrame(data["documents"].values())
+
+queries_d = copy.deepcopy(data["topics"])
+for k, v in data["qrels"].items():
+    queries_d[k].update(data["qrels"][k])
+queries = list(map(lambda x: f"{x['number']}<>{x['description']}", queries_d.values()))
 
 # Check if index already exists
 import os
@@ -29,8 +35,9 @@ else:
     indexref = pt.IndexRef.of(index_folder)
 
 root = tk.Tk()
-
-
+selected_predefined_query = ""
+is_predefined_query = False
+predefined_query_number = ""
 # Set the default font for all widgets
 default_font = tkfont.nametofont("TkDefaultFont")
 default_font.configure(family="Arial", size=14, weight="normal")
@@ -83,7 +90,47 @@ use_checks.grid(row=5, column=0, columnspan=2, sticky="w", pady=5)
 # Buttons (sixth row)
 def open_window1():
     win = tk.Toplevel(root)
-    win.title("Window 1")
+    win.title("Predefined Queries")
+    
+    # Create a scrollable canvas
+    canvas = tk.Canvas(win)
+    scrollbar = ttk.Scrollbar(win, orient="vertical", command=canvas.yview)
+    scrollable_frame = tk.Frame(canvas)
+    
+    scrollable_frame.bind(
+        "<Configure>",
+        lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+    )
+    
+    canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+    canvas.configure(yscrollcommand=scrollbar.set)
+    
+    # Pack the canvas and scrollbar
+    canvas.pack(side="left", fill="both", expand=True, padx=10, pady=10)
+    scrollbar.pack(side="right", fill="y")
+    
+    # Create clickable labels for each query in boxes
+    for query in queries:
+        # Create a frame for each query with border and margin
+        query_frame = tk.Frame(scrollable_frame, relief="solid", borderwidth=1, padx=10, pady=5)
+        query_frame.pack(fill="x", pady=5, padx=5)
+        
+        lbl = tk.Label(query_frame, text=query, cursor="hand2", wraplength=400, justify="left")
+        lbl.pack(fill="x", pady=5)
+        
+        # Bind click event to set the selected query
+        lbl.bind("<Button-1>", lambda e, q=query: set_selected_query(q))
+    
+    def set_selected_query(query):
+        global selected_predefined_query, is_predefined_query, predefined_query_number
+        selected_predefined_query = query
+        is_predefined_query = True
+        predefined_query_number = query.split("<>")[0]
+        text_area.delete("1.0", tk.END)
+        text_area.insert("1.0", query.split("<>")[1])
+        win.destroy()
+
+        
 def open_window2():
     win = tk.Toplevel(root)
     win.title("Window 2")
@@ -129,105 +176,40 @@ def show_full_content(title, content):
 def display_list_with_status(parent, header_text, items, correctness):
     header = tk.Label(parent, text=header_text, font=("Arial", 12, "bold"), pady=10, bg=parent["bg"])
     header.pack(anchor="w", fill="x")
+    # Create a canvas with scrollbar
+    canvas = tk.Canvas(parent)
+    scrollbar = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
+    scrollable_frame = tk.Frame(canvas)
+
+    scrollable_frame.bind(
+        "<Configure>",
+        lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+    )
+
+    canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+    canvas.configure(yscrollcommand=scrollbar.set)
+
+    # Pack the canvas and scrollbar
+    canvas.pack(side="left", fill="both", expand=True)
+    scrollbar.pack(side="right", fill="y")
+
+    # Add items to the scrollable frame
     for i, (item, correct) in enumerate(zip(items, correctness)):
         color = "#b6fcb6" if correct else "#ffb3b3"  # green or red
         print(item)
         short_text = item[:200] + ("..." if len(item) > 200 else "")
-        lbl = tk.Label(parent, text=short_text, bg=color, anchor="w", padx=5, pady=2, cursor="hand2", wraplength=400, justify="left")
+        lbl = tk.Label(scrollable_frame, text=short_text, bg=color, anchor="w", padx=5, pady=2, cursor="hand2", wraplength=400, justify="left")
         lbl.pack(fill="x", pady=1)
         lbl.bind("<Button-1>", lambda e, t=header_text, c=item: show_full_content(t, c))
 
 def clear_list(parent, header_text):
-    # Find and destroy the header label
+    # Find and destroy all widgets in the parent frame
     for widget in parent.winfo_children():
-        if isinstance(widget, tk.Label) and widget.cget("text") == header_text:
-            widget.destroy()
-            break
-    
-    # Find and destroy all list item labels
-    for widget in parent.winfo_children():
-        if isinstance(widget, tk.Label) and widget.cget("cursor") == "hand2":
+        if isinstance(widget, (tk.Canvas, tk.Label, ttk.Scrollbar)):
             widget.destroy()
 
 # Example data for columns 2 and 3
-col2_items = ["""Doc1: Introduction
-              
-              Command 'python' not found, did you mean:
-  command 'python3' from deb python3
-  command 'python' from deb python-is-python3
-(devriquery) alpfischer@alpfischer-ubuntu:~/Devr-iQuery$ python3 src/ui/main.py 
-Traceback (most recent call last):
-  File "/home/alpfischer/Devr-iQuery/src/ui/main.py", line 1, in <module>
-    import tkinter as tk
-ModuleNotFoundError: No module named 'tkinter'
-(devriquery) alpfischer@alpfischer-ubuntu:~/Devr-iQuery$ sudo apt update
-sudo apt install python3-tk
-[sudo] password for alpfischer: 
-Get:1 file:/var/cuda-repo-ubuntu2204-12-6-local  InRelease [1.572 B]
-Get:1 file:/var/cuda-repo-ubuntu2204-12-6-local  InRelease [1.572 B]
-Hit:2 http://tr.archive.ubuntu.com/ubuntu jammy InRelease
-Hit:3 https://packages.microsoft.com/repos/code stable InRelease                                                                                                                                                   
-Hit:4 https://dl.google.com/linux/chrome/deb stable InRelease                                                                                                                                                      
-Get:5 http://tr.archive.ubuntu.com/ubuntu jammy-updates InRelease [128 kB]                                                                                                                                         
-Hit:6 http://tr.archive.ubuntu.com/ubuntu jammy-backports InRelease                                                                                                                                                
-Get:7 https://cli.github.com/packages stable InRelease [3.917 B]                                                
-Get:8 http://security.ubuntu.com/ubuntu jammy-security InRelease [129 kB]                              
-Hit:9 https://download.docker.com/linux/ubuntu jammy InRelease                 
-Get:10 http://tr.archive.ubuntu.com/ubuntu jammy-updates/main amd64 Packages [2.582 kB]
-Err:7 https://cli.github.com/packages stable InRelease                                     
-  The following signatures were invalid: EXPKEYSIG 23F3D4EA75716059 GitHub CLI <opensource+cli@github.com>
-Get:11 http://tr.archive.ubuntu.com/ubuntu jammy-updates/main i386 Packages [809 kB]                   
-Hit:12 https://ppa.launchpadcontent.net/obsproject/obs-studio/ubuntu jammy InRelease                             
-Ign:13 https://ppa.launchpadcontent.net/otto-kesselgulasch/gimp/ubuntu jammy InRelease
-Err:14 https://ppa.launchpadcontent.net/otto-kesselgulasch/gimp/ubuntu jammy Release
-  404  Not Found [IP: 185.125.190.80 443]
-Get:15 http://security.ubuntu.com/ubuntu jammy-security/main amd64 DEP-11 Metadata [54,5 kB]
-Get:16 http://security.ubuntu.com/ubuntu jammy-security/restricted amd64 DEP-11 Metadata [208 B]
-Get:17 http://security.ubuntu.com/ubuntu jammy-security/universe amd64 DEP-11 Metadata [125 kB]
-Get:18 http://security.ubuntu.com/ubuntu jammy-security/multiverse amd64 DEP-11 Metadata [208 B]
-Reading package lists... Done                                          
-W: An error occurred during the signature verification. The repository is not updated and the previous index files will be used. GPG error: https://cli.github.com/packages stable InRelease: The following signatures were invalid: EXPKEYSIG 23F3D4EA75716059 GitHub CLI <opensource+cli@github.com>
-E: The repository 'https://ppa.launchpadcontent.net/otto-kesselgulasch/gimp/ubuntu jammy Release' does not have a Release file.
-N: Updating from such a repository can't be done securely, and is therefore disabled by default.
-N: See apt-secure(8) manpage for repository creation and user configuration details.
-Reading package lists... Done
-Building dependency tree... Done
-Reading state information... Done
-The following package was automatically installed and is no longer required:
-  nvidia-firmware-535-535.183.01
-Use 'sudo apt autoremove' to remove it.
-The following additional packages will be installed:
-  blt tk8.6-blt2.5
-Suggested packages:
-  blt-demo tix python3-tk-dbg
-The following NEW packages will be installed:
-  blt python3-tk tk8.6-blt2.5
-0 upgraded, 3 newly installed, 0 to remove and 6 not upgraded.
-Need to get 757 kB of archives.
-After this operation, 2.920 kB of additional disk space will be used.
-Do you want to continue? [Y/n] y
-Get:1 http://tr.archive.ubuntu.com/ubuntu jammy/main amd64 tk8.6-blt2.5 amd64 2.5.3+dfsg-4.1build2 [643 kB]
-Get:2 http://tr.archive.ubuntu.com/ubuntu jammy/main amd64 blt amd64 2.5.3+dfsg-4.1build2 [4.838 B]
-Get:3 http://tr.archive.ubuntu.com/ubuntu jammy-updates/main amd64 python3-tk amd64 3.10.8-1~22.04 [110 kB]
-Fetched 757 kB in 0s (2.263 kB/s)    
-Selecting previously unselected package tk8.6-blt2.5.
-(Reading database ... 270059 files and directories currently installed.)
-Preparing to unpack .../tk8.6-blt2.5_2.5.3+dfsg-4.1build2_amd64.deb ...
-Unpacking tk8.6-blt2.5 (2.5.3+dfsg-4.1build2) ...
-Selecting previously unselected package blt.
-Preparing to unpack .../blt_2.5.3+dfsg-4.1build2_amd64.deb ...
-Unpacking blt (2.5.3+dfsg-4.1build2) ...
-Selecting previously unselected package python3-tk:amd64.
-Preparing to unpack .../python3-tk_3.10.8-1~22.04_amd64.deb ...
-Unpacking python3-tk:amd64 (3.10.8-1~22.04) ...
-Setting up tk8.6-blt2.5 (2.5.3+dfsg-4.1build2) ...
-Setting up blt (2.5.3+dfsg-4.1build2) ...
-Setting up python3-tk:amd64 (3.10.8-1~22.04) ...
-Processing triggers for libc-bin (2.35-0ubuntu3.9) ...
-              
-              
-              
-              """, "Doc2: Methods", "Doc3: Results"]
+col2_items = ["""Doc1:""", "Doc2: Methods", "Doc3: Results"]
 col2_correctness = [True, False, True]
 
 col3_items = ["Query1: What is AI?", "Query2: Define ML", "Query3: NLP tasks"]
@@ -246,8 +228,19 @@ display_list_with_status(col3, "Ground Truth Documents", col3_items, col3_correc
 # ...existing code...
 
 def process_query():
+    
+    to_rep_chars = ["(", ")", ".", ",", "!", "?", "-"]
+
     # Get query from text area
     query = text_area.get("1.0", "end-1c")
+    # Clean query to prevent Java parsing errors
+    query = clean_text(query) 
+    # Remove newlines and extra whitespace
+    query = re.sub(r'\s+', ' ', query).strip()
+    # Remove special characters that could cause parsing issues
+    query = re.sub(r'[^\w\s.,?!-]', '', query)
+    for char in to_rep_chars:
+        query = query.replace(char, "")
 
     # Get parameters from UI
     bm25_limit = int(num_var1.get())
@@ -270,15 +263,41 @@ def process_query():
     # Get text column as list
     text_list = filtered_docs['text'].tolist()
     # Set correctness based on checkbox value
-    if use_checks:
+    if use_checks and is_predefined_query:
       # means user selected a predefined query thus we need to check whether these relevant texts are present in the qrels entry  
-      col2_correctness = [use_checks] * len(text_list) if use_checks else [True] * len(reranked_d)
+      
+      query_qrels = queries_d[predefined_query_number]
+      col2_correctness = [False] * len(text_list)
+      filtered_docs_docnos = filtered_docs["docno"].tolist()
+      for docno in filtered_docs_docnos:
+        if docno in query_qrels and query_qrels[docno] == "1":
+          col2_correctness[filtered_docs_docnos.index(docno)] = True
+      
     else:
       col2_correctness = [True] * len(text_list)
 
     print("Retrieved Documents: ", text_list)
     clear_list(col2, "Retrieved Documents")
     display_list_with_status(col2, "Retrieved Documents", text_list, col2_correctness)
+
+
+
+    # also update the ground truth documents list
+    col3_items = []
+    col3_correctness = []
+    for docno in query_qrels:
+        if query_qrels[docno] == "1":
+            try:
+              col3_items.append(f"Doc{docno}: {docs_df.loc[docs_df['docno'] == docno, 'text'].values[0]}")
+              col3_correctness.append(True)
+            except Exception as e:
+                # means the docno is not in the docs_df
+                print(e)
+                continue
+            print("GT hit")
+    
+    clear_list(col3, "Ground Truth Documents")
+    display_list_with_status(col3, "Ground Truth Documents", col3_items, col3_correctness)
 
     # Update stats
     stats_value.set(f"""
