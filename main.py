@@ -141,19 +141,17 @@ def open_window1():
         win.destroy()
 
         
-def open_window2():
-    win = tk.Toplevel(root)
-    win.title("Window 2")
+
 def open_window3():
     process_query()
 
 button_frame = tk.Frame(col1)
 button_frame.grid(row=6, column=0, columnspan=2, pady=10, sticky="ew")
 btn1 = ttk.Button(button_frame, text="Predefined Queries", command=open_window1)
-btn2 = ttk.Button(button_frame, text="Documents", command=open_window2)
+
 btn3 = ttk.Button(button_frame, text="Run Query", command=open_window3)
 btn1.pack(side="left", expand=True, fill="x", padx=2)
-btn2.pack(side="left", expand=True, fill="x", padx=2)
+
 btn3.pack(side="left", expand=True, fill="x", padx=2)
 
 # Query and Indexing Stats header (last row)
