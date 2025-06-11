@@ -39,7 +39,7 @@ class ReRanker:
         :return: List of reranked documents.
         """
 
-        model = SentenceTransformer(model) # intfloat/e5-mistral-7b-instruct
+        model = SentenceTransformer('all-MiniLM-L6-v2')
         faiss_index = ReRanker.initialize(model)
         embeddings = ReRanker.generate_embeddings(model, documents)
         start_time = time.time()

@@ -34,6 +34,8 @@ def parse_documents(folder_path):
                 result[doc_dict["docno"]] = doc_dict
                 # result.append(doc_dict)
         file_index+=1
+        if file_index > 10:
+            break
         
     return result
 
