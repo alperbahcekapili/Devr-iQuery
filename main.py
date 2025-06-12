@@ -6,6 +6,7 @@ import tkinter.font as tkfont
 
 import requests
 from src.vector.indexer import ReRanker
+from src.vector.indexer import FineGrainedReRanker
 from src.vector.bm25 import clean_text, create_index
 from src.data.reader import parse_data
 from src.vector.indexer import ReRanker
@@ -72,7 +73,14 @@ col1.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
 dropdown_label = tk.Label(col1, text="Embedding Model")
 dropdown_label.grid(row=0, column=1, sticky="w", padx=5)
 dropdown_var = tk.StringVar()
-dropdown = ttk.Combobox(col1, textvariable=dropdown_var, values=["BERT", "all-MiniLM-L6-v2"])
+dropdown = ttk.Combobox(col1, textvariable=dropdown_var, values=[
+    "all-MiniLM-L6-v2", 
+    "BERT", 
+    "Qwen/Qwen3-Embedding-0.6B",
+    "Qwen/Qwen3-Embedding-4B", 
+    "Qwen/Qwen3-Embedding-8B"
+])
+
 dropdown.grid(row=0, column=0, sticky="ew", pady=2)
 
 # Numeric input (second row)
@@ -99,6 +107,10 @@ text_area.grid(row=4, column=0, columnspan=2, sticky="ew", pady=2)
 use_checks_var = tk.BooleanVar(value=False)
 use_checks = ttk.Checkbutton(col1, text="Using Predefined Queries", variable=use_checks_var)
 use_checks.grid(row=5, column=0, columnspan=2, sticky="w", pady=5)
+
+use_finegrained_var = tk.BooleanVar(value=False)
+use_finegrained = ttk.Checkbutton(col1, text="Use Fine-grained Reranking", variable=use_finegrained_var)
+use_finegrained.grid(row=6, column=0, columnspan=2, sticky="w", pady=5)
 
 # Buttons (sixth row)
 def open_window1():
@@ -149,7 +161,7 @@ def open_window3():
     process_query()
 
 button_frame = tk.Frame(col1)
-button_frame.grid(row=6, column=0, columnspan=2, pady=10, sticky="ew")
+button_frame.grid(row=7, column=0, columnspan=2, pady=10, sticky="ew")
 btn1 = ttk.Button(button_frame, text="Predefined Queries", command=open_window1)
 
 btn3 = ttk.Button(button_frame, text="Run Query", command=open_window3)
@@ -159,7 +171,7 @@ btn3.pack(side="left", expand=True, fill="x", padx=2)
 
 # Query and Indexing Stats header (last row)
 stats_header = tk.Label(col1, text="Query and Indexing Stats", font=("Arial", 12, "bold"), pady=10)
-stats_header.grid(row=7, column=0, columnspan=2, sticky="w")
+stats_header.grid(row=8, column=0, columnspan=2, sticky="w")
 
 # Stats value (below header)
 stats_value = tk.StringVar(value="""
@@ -172,11 +184,11 @@ Query Metrics: Precision etc.
 
 """)
 stats_label = tk.Label(col1, textvariable=stats_value, bg="#e0e0e0", anchor="w", justify="left")
-stats_label.grid(row=8, column=0, columnspan=2, sticky="ew")
+stats_label.grid(row=9, column=0, columnspan=2, sticky="ew")
 
 # Add new text box for query results
 llm_response_text = tk.Text(col1, height=5, width=40, wrap="word")
-llm_response_text.grid(row=9, column=0, columnspan=2, sticky="ew", pady=10)
+llm_response_text.grid(row=10, column=0, columnspan=2, sticky="ew", pady=10)
 llm_response_text.insert("1.0", "LLM answers results will appear here...")
 llm_response_text.config(state="disabled")  # Make it read-only
 
@@ -308,10 +320,11 @@ def process_query():
     for char in to_rep_chars:
         query = query.replace(char, "")
 
-    # Get parameters from UI
     bm25_limit = int(num_var1.get())
     total_docs = int(num_var2.get())
-    use_checks = use_checks_var.get()  # Get checkbox value
+    use_checks = use_checks_var.get()
+    use_finegrained = use_finegrained_var.get()  # Add this line
+    selected_model = dropdown_var.get()
 
     bm25 = pt.terrier.BatchRetrieve(indexref, wmodel="BM25", num_results=bm25_limit)
     start_time = time.time()
@@ -321,7 +334,22 @@ def process_query():
     # Process query using ReRanker
     docs_to_rerank = pd.merge(results, docs_df, on="docno", how="left")
     docs_to_rerank = docs_to_rerank[["docno", "text"]]
-    reranked_d, reranked_indices, faiss_retrieval_duration, index_creation_duration = ReRanker.rerank(docs_to_rerank["text"].tolist(), query, model=dropdown_var.get(), k=int(num_var2.get()))
+    if use_finegrained and selected_model.startswith('Qwen'):
+        # Use fine-grained reranking
+        reranked_d, reranked_indices, faiss_retrieval_duration, index_creation_duration = FineGrainedReRanker.rerank(
+            docs_to_rerank["text"].tolist(), 
+            query, 
+            model=selected_model, 
+            k=int(num_var2.get())
+        )
+    else:
+        # Use regular reranking
+        reranked_d, reranked_indices, faiss_retrieval_duration, index_creation_duration = ReRanker.rerank(
+            docs_to_rerank["text"].tolist(), 
+            query, 
+            model=selected_model, 
+            k=int(num_var2.get())
+        )
 
     initial_order = docs_to_rerank["docno"].tolist()
     reranked_order = docs_to_rerank.iloc[reranked_indices]["docno"].tolist()
