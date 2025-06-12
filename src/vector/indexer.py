@@ -7,6 +7,20 @@ from transformers import AutoTokenizer, AutoModel, AutoModelForCausalLM
 import numpy as np
 from typing import List, Tuple, Dict, Optional
 
+# Device detection and management
+def get_device():
+    """Get the best available device (CUDA > MPS > CPU)"""
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+        print(f"Using CUDA device: {torch.cuda.get_device_name()}")
+    elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+        device = torch.device("mps")
+        print("Using Apple Metal Performance Shaders (MPS)")
+    else:
+        device = torch.device("cpu")
+        print("Using CPU")
+    return device
+
 class ReRanker:
     def __init__(self, index):
         self.index = index
@@ -77,17 +91,42 @@ class ReRanker:
         def get_detailed_instruct(task_description: str, query: str) -> str:
             return f'Instruct: {task_description}\nQuery: {query}'
 
-        def tokenize(tokenizer, input_texts, eod_id, max_length):
+        def tokenize(tokenizer, input_texts, eod_id, max_length, device):
             batch_dict = tokenizer(input_texts, padding=False, truncation=True, max_length=max_length-2)
             for seq, att in zip(batch_dict["input_ids"], batch_dict["attention_mask"]):
                 seq.append(eod_id)
                 att.append(1)
             batch_dict = tokenizer.pad(batch_dict, padding=True, return_tensors="pt")
+            # Move to device
+            for key in batch_dict:
+                batch_dict[key] = batch_dict[key].to(device)
             return batch_dict
 
         try:
+            device = get_device()
+            
+            print(f"Loading Qwen model {model_name} on {device}")
             tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side='left')
-            model = AutoModel.from_pretrained(model_name)
+            
+            # Load model with appropriate settings based on device
+            if device.type == "cuda":
+                # Use float16 and flash attention for GPU
+                try:
+                    model = AutoModel.from_pretrained(
+                        model_name, 
+                        torch_dtype=torch.float16,
+                        attn_implementation="flash_attention_2"
+                    ).to(device)
+                    print("Using flash_attention_2 for better performance")
+                except:
+                    print("Flash attention not available, using default attention")
+                    model = AutoModel.from_pretrained(
+                        model_name, 
+                        torch_dtype=torch.float16
+                    ).to(device)
+            else:
+                # Use float32 for CPU/MPS
+                model = AutoModel.from_pretrained(model_name).to(device)
             
             task = 'Given a web search query, retrieve relevant passages that answer the query'
             query_with_instruct = get_detailed_instruct(task, query)
@@ -97,7 +136,7 @@ class ReRanker:
             max_length = 8192
             
             start_time = time.time()
-            batch_dict = tokenize(tokenizer, input_texts, eod_id, max_length)
+            batch_dict = tokenize(tokenizer, input_texts, eod_id, max_length, device)
             
             with torch.no_grad():
                 outputs = model(**batch_dict)
@@ -115,10 +154,13 @@ class ReRanker:
             index_creation_duration = 0.0
             faiss_retrieval_duration = time.time() - start_time
             
+            print(f"Qwen embedding completed in {faiss_retrieval_duration:.3f}s on {device}")
+            
             return distances, indices, faiss_retrieval_duration, index_creation_duration
             
         except Exception as e:
             print(f"Error with Qwen model {model_name}: {e}")
+            print("Falling back to sentence-transformers")
             return ReRanker._rerank_with_sentence_transformers(documents, query, 'all-MiniLM-L6-v2', k)
 
 
@@ -132,15 +174,40 @@ class FineGrainedReRanker:
         self.model_name = model_name
         self.tokenizer = None
         self.model = None
+        self.device = None
         self.token_embeddings_cache = {}
         
     def _load_model(self):
         if self.model is None:
             try:
+                self.device = get_device()
+                
+                print(f"Loading fine-grained reranker {self.model_name} on {self.device}")
                 self.tokenizer = AutoTokenizer.from_pretrained(self.model_name, padding_side='left')
-                self.model = AutoModelForCausalLM.from_pretrained(self.model_name).eval()
+                
+                # Load model with appropriate settings based on device
+                if self.device.type == "cuda":
+                    try:
+                        self.model = AutoModelForCausalLM.from_pretrained(
+                            self.model_name,
+                            torch_dtype=torch.float16,
+                            attn_implementation="flash_attention_2"
+                        ).to(self.device).eval()
+                        print("Using flash_attention_2 for fine-grained reranker")
+                    except:
+                        print("Flash attention not available for reranker, using default attention")
+                        self.model = AutoModelForCausalLM.from_pretrained(
+                            self.model_name,
+                            torch_dtype=torch.float16
+                        ).to(self.device).eval()
+                else:
+                    self.model = AutoModelForCausalLM.from_pretrained(self.model_name).to(self.device).eval()
+                
                 self.token_false_id = self.tokenizer.convert_tokens_to_ids("no")
                 self.token_true_id = self.tokenizer.convert_tokens_to_ids("yes")
+                
+                print(f"Fine-grained reranker loaded successfully on {self.device}")
+                
             except Exception as e:
                 print(f"Failed to load Qwen3 reranker: {e}")
                 raise
@@ -167,6 +234,11 @@ class FineGrainedReRanker:
             inputs['input_ids'][i] = prefix_tokens + ele + suffix_tokens
             
         inputs = self.tokenizer.pad(inputs, padding=True, return_tensors="pt", max_length=max_length)
+        
+        # Move to device
+        for key in inputs:
+            inputs[key] = inputs[key].to(self.device)
+            
         return inputs
 
     @torch.no_grad()
@@ -279,12 +351,15 @@ class FineGrainedReRanker:
         
         retrieval_duration = time.time() - start_time
         
+        print(f"Fine-grained reranking completed in {retrieval_duration:.3f}s on {self.device}")
+        
         # Prepare analysis metadata for future passage retrieval and LLM integration
         analysis_metadata = {
             'passage_candidates': passage_candidates,
             'token_embeddings': analysis_result['token_embeddings'],
             'retrieval_duration': retrieval_duration,
-            'model_name': self.model_name
+            'model_name': self.model_name,
+            'device': str(self.device)
         }
         
         return top_k_scores, top_k_indices, analysis_metadata
