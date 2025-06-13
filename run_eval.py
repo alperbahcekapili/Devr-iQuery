@@ -35,6 +35,7 @@ try:
     from data.reader import parse_data
     from vector.indexer import ReRanker, FineGrainedReRanker
     from vector.bm25 import create_index
+    from src.vector.bm25 import create_index, preprocess_for_bm25
     logger.info("Successfully imported all modules")
 except Exception as e:
     logger.error(f"Error importing modules: {e}")
@@ -56,46 +57,15 @@ def sanitize_query_for_terrier(query):
     """
     logger.debug(f"Original query: '{query}'")
     
-    # Remove newlines and excessive whitespace
-    query = re.sub(r'\s+', ' ', query).strip()
+    # Use the BM25 preprocessing function instead of manual cleaning
+    preprocessed_query = preprocess_for_bm25(query)
     
-    # Terrier query parser has issues with certain characters
-    # Escape or remove problematic characters: ?, (, ), ", :, -, etc.
-    query = query.replace('?', ' ')
-    query = query.replace('(', ' ')
-    query = query.replace(')', ' ')
-    query = query.replace('"', ' ')
-    query = query.replace(':', ' ')
-    query = query.replace('-', ' ')
-    query = query.replace('/', ' ')
-    query = query.replace('\'', ' ')
-    query = query.replace('.', ' ')
-    query = query.replace(',', ' ')
-    query = query.replace('!', ' ')
-    query = query.replace('&', ' and ')
-    query = query.replace('|', ' or ')
+    # If query is empty after preprocessing, use a default
+    if not preprocessed_query or len(preprocessed_query) < 2:
+        preprocessed_query = "document"
     
-    # Terrier has issues with words that are too long
-    words = []
-    for word in query.split():
-        if len(word) > 30:  # Truncate very long words
-            word = word[:30]
-        words.append(word)
-    
-    query = ' '.join(words)
-    
-    # Remove any other non-alphanumeric characters
-    query = re.sub(r'[^\w\s]', ' ', query)
-    
-    # Clean up extra whitespace
-    query = re.sub(r'\s+', ' ', query).strip()
-    
-    # If query is empty, use a default
-    if not query or len(query) < 2:
-        query = "document"
-    
-    logger.debug(f"Sanitized query for Terrier: '{query}'")
-    return query
+    logger.debug(f"BM25 preprocessed query: '{preprocessed_query}'")
+    return preprocessed_query
 
 def calculate_precision_at_k(retrieved_docs, relevant_docs, k):
     """Calculate precision at k"""
@@ -373,13 +343,16 @@ def run_evaluation():
             # Keep description shorter to avoid parsing issues
             description_words = description.split()[:15]  # Limit to first 15 words
             query += " " + " ".join(description_words)
-            
+        
+        # Keep original query for rerankers    
+        original_query = query
+        
         # Sanitize the query for Terrier
         terrier_query = sanitize_query_for_terrier(query)
-        logger.info(f"Sanitized query for Terrier: '{terrier_query}'")
+        logger.info(f"BM25 preprocessed query: '{terrier_query}'")
         
-        # Clean query for rerankers (less strict cleaning)
-        reranker_query = re.sub(r'\s+', ' ', query).strip()
+        # Query for rerankers
+        reranker_query = re.sub(r'\s+', ' ', original_query).strip()
         logger.info(f"Query for rerankers: '{reranker_query}'")
         
         # Get relevant documents for this topic

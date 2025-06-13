@@ -8,7 +8,7 @@ import os
 
 import requests
 from src.vector.indexer import ReRanker, FineGrainedReRanker
-from src.vector.bm25 import clean_text, create_index
+from src.vector.bm25 import clean_text, create_index, preprocess_for_bm25
 from src.data.reader import parse_data
 import pyterrier as pt
 import pandas as pd
@@ -364,14 +364,18 @@ def process_query():
         messagebox.showwarning("Warning", "Please enter a query")
         return
     
-    # Clean query to prevent Java parsing errors
-    query = clean_text(query) 
-    # Remove newlines and extra whitespace
-    query = re.sub(r'\s+', ' ', query).strip()
-    # Remove special characters that could cause parsing issues
-    query = re.sub(r'[^\w\s.,?!-]', '', query)
+    # Store original query for rerankers
+    original_query = clean_text(query)  # Basic cleaning only
+    original_query = re.sub(r'\s+', ' ', original_query).strip()
+    original_query = re.sub(r'[^\w\s.,?!-]', '', original_query)
     for char in to_rep_chars:
-        query = query.replace(char, "")
+        original_query = original_query.replace(char, "")
+
+    # Preprocess query for BM25
+    bm25_query = preprocess_for_bm25(query)
+    
+    print(f"Original query for rerankers: {original_query}")
+    print(f"Preprocessed query for BM25: {bm25_query}")
 
     # Get parameters from UI
     try:
@@ -388,35 +392,43 @@ def process_query():
     selected_model = dropdown_var.get()
 
     print(f"\n=== Processing Query ===")
-    print(f"Query: {query}")
+    print(f"Original Query: {original_query}")
+    print(f"BM25 Query: {bm25_query}")
     print(f"Model: {selected_model}")
     print(f"Use fine-grained: {use_finegrained}")
     print(f"Use passages: {use_passages}")
 
-    # BM25 retrieval
+    # BM25 retrieval using preprocessed query
     bm25 = pt.terrier.BatchRetrieve(indexref, wmodel="BM25", num_results=bm25_limit)
     start_time = time.time()
     try:
-        results = bm25.search(query)
+        results = bm25.search(bm25_query)  # Use preprocessed query for BM25
         bm25_retrieval_duration = time.time() - start_time
         print(f"BM25 retrieval completed in {bm25_retrieval_duration:.3f}s")
     except Exception as e:
         messagebox.showerror("Error", f"BM25 search failed: {str(e)}")
         return
 
-    # Process query using ReRanker or FineGrainedReRanker
+    # Get documents for reranking - use ORIGINAL text, not preprocessed
     docs_to_rerank = pd.merge(results, docs_df, on="docno", how="left")
-    docs_to_rerank = docs_to_rerank[["docno", "text"]]
+    
+    # Use original_text if available (from new preprocessing), otherwise use text
+    if 'original_text' in docs_to_rerank.columns:
+        docs_to_rerank = docs_to_rerank[["docno", "original_text"]].rename(columns={"original_text": "text"})
+        print("Using original text for reranking (preprocessed docs)")
+    else:
+        docs_to_rerank = docs_to_rerank[["docno", "text"]]
+        print("Using text for reranking (non-preprocessed docs)")
     
     analysis_metadata = None
     
     try:
         if use_finegrained and selected_model.startswith('Qwen'):
-            # Use fine-grained reranking
+            # Use fine-grained reranking with ORIGINAL query
             print("Using fine-grained reranking...")
             reranked_d, reranked_indices, faiss_retrieval_duration, index_creation_duration = FineGrainedReRanker.rerank(
                 docs_to_rerank["text"].tolist(), 
-                query, 
+                original_query,  # Use original query for reranking
                 model=selected_model.replace('Embedding', 'Reranker'), 
                 k=total_docs
             )
@@ -426,11 +438,11 @@ def process_query():
                 analysis_metadata = FineGrainedReRanker._last_analysis_metadata
                 
         else:
-            # Use regular reranking
+            # Use regular reranking with ORIGINAL query
             print("Using regular reranking...")
             reranked_d, reranked_indices, faiss_retrieval_duration, index_creation_duration = ReRanker.rerank(
                 docs_to_rerank["text"].tolist(), 
-                query, 
+                original_query,  # Use original query for reranking
                 model=selected_model, 
                 k=total_docs
             )
@@ -472,7 +484,11 @@ def process_query():
         for docno in query_qrels:
             if query_qrels[docno] == "1":
                 try:
-                    gt_doc_text = docs_df.loc[docs_df['docno'] == docno, 'text'].values[0]
+                    # Use original text for display
+                    if 'original_text' in docs_df.columns:
+                        gt_doc_text = docs_df.loc[docs_df['docno'] == docno, 'original_text'].values[0]
+                    else:
+                        gt_doc_text = docs_df.loc[docs_df['docno'] == docno, 'text'].values[0]
                     col3_items.append(gt_doc_text)
                     col3_correctness.append(True)
                 except Exception as e:
@@ -482,17 +498,17 @@ def process_query():
         clear_list(col3, "Ground Truth Documents")
         display_list_with_status(col3, "Ground Truth Documents", col3_items, col3_correctness)
 
-    # Passage Retrieval
+    # Passage Retrieval - use ORIGINAL query
     passages_text = "No passages extracted."
-    to_send_query = f"Query: {query}\nRetrieved Documents: {text_list}"
+    to_send_query = f"Query: {original_query}\nRetrieved Documents: {text_list}"
     
     if use_passages and passage_retriever and analysis_metadata:
         try:
             print("Extracting relevant passages...")
             
-            # Extract passages using the analysis metadata
+            # Extract passages using the analysis metadata with original query
             passages = passage_retriever.extract_passages_from_analysis(
-                analysis_metadata, text_list, query, top_passages
+                analysis_metadata, text_list, original_query, top_passages
             )
             
             if passages:
@@ -500,7 +516,7 @@ def process_query():
                 passages_text = passage_retriever.format_passages_for_display(passages)
                 
                 # Create enhanced query for LLM with passages
-                to_send_query = f"Query: {query}\n\nMost Relevant Passages:\n"
+                to_send_query = f"Query: {original_query}\n\nMost Relevant Passages:\n"
                 for i, passage in enumerate(passages, 1):
                     to_send_query += f"\nPassage {i} (Score: {passage['relevance_score']:.3f}):\n"
                     to_send_query += f'"{passage["text"]}"\n'
@@ -532,6 +548,7 @@ BM25 Retrieval Duration: {bm25_retrieval_duration:.5f} seconds
 BM25 Index Creation Duration: {bm25_index_creation_duration:.5f} seconds
 Passage Extraction: {'Enabled' if use_passages else 'Disabled'}
 Model Used: {selected_model}
+BM25 Preprocessing: Enabled (stemmed, stopwords removed, lowercased)
     """)
     
     print("Query processing completed successfully")
